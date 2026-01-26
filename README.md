@@ -1,5 +1,4 @@
 # stake
-Stake Protocol spec, smart contracts, and SDK for non-transferable onchain ownership (Stakes &amp; Claims) plus Pact agreements and the private→public Transition.
 
 Stake is a decentralized ownership system for crypto startups that replaces “token = equity” with non-transferable onchain ownership certificates.
 
