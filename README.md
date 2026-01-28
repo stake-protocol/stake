@@ -2,7 +2,10 @@
 
 **Soulbound Equity Certificates (SEC) for Onchain Ownership**
 
+[![CI](https://github.com/stake-protocol/stake/actions/workflows/ci.yml/badge.svg)](https://github.com/stake-protocol/stake/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Solidity](https://img.shields.io/badge/Solidity-0.8.24-blue.svg)](https://soliditylang.org/)
+[![Foundry](https://img.shields.io/badge/Built%20with-Foundry-orange.svg)](https://book.getfoundry.sh/)
 
 Stake Protocol defines a minimal onchain standard for issuing non-transferable equity certificates as verifiable, wallet-held records. The protocol models a deterministic lifecycle:
 
