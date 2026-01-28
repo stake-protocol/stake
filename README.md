@@ -79,7 +79,7 @@ cp contracts/src/StakeCertificates.sol your-project/src/
 
 The reference implementation uses:
 - OpenZeppelin Contracts v5.x (`@openzeppelin/contracts`)
-- Solidity ^0.8.23
+- Solidity ^0.8.24
 
 ### Basic Usage
 
