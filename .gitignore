@@ -1,3 +1,15 @@
+# AI/LLM configuration files
+claude.md
+.claude/
+.cursor/
+.lovable/
+CLAUDE.md
+
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/lib/
+
 # Logs
 logs
 *.log
