@@ -33,7 +33,7 @@ jobs:
         run: forge test -vvv
 
       - name: Run Forge coverage
-        run: forge coverage --report summary
+        run: forge coverage --ir-minimum --report summary
 
       - name: Check gas snapshots
         run: forge snapshot --check --tolerance 5 || forge snapshot
