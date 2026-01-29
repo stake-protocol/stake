@@ -100,12 +100,7 @@ abstract contract SoulboundERC721 is ERC721, IERC5192, AccessControl {
 
     string internal _baseTokenURI;
 
-    constructor(
-        string memory name_,
-        string memory symbol_,
-        address issuer_,
-        bytes32 issuerId_
-    ) ERC721(name_, symbol_) {
+    constructor(string memory name_, string memory symbol_, address issuer_, bytes32 issuerId_) ERC721(name_, symbol_) {
         ISSUER = issuer_;
         ISSUER_ID = issuerId_;
         _grantRole(DEFAULT_ADMIN_ROLE, issuer_);
@@ -122,13 +117,7 @@ abstract contract SoulboundERC721 is ERC721, IERC5192, AccessControl {
         return true;
     }
 
-    function supportsInterface(bytes4 interfaceId)
-        public
-        view
-        virtual
-        override(ERC721, AccessControl)
-        returns (bool)
-    {
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC721, AccessControl) returns (bool) {
         return interfaceId == type(IERC5192).interfaceId || super.supportsInterface(interfaceId);
     }
 
@@ -155,9 +144,7 @@ abstract contract SoulboundERC721 is ERC721, IERC5192, AccessControl {
         address from = _ownerOf(tokenId);
 
         // Allow minting (from == address(0)), block transfers
-        if (from != address(0) && to != address(0)) {
-            revert Soulbound();
-        }
+        if (from != address(0) && to != address(0)) revert Soulbound();
 
         return super._update(to, tokenId, auth);
     }
@@ -166,9 +153,7 @@ abstract contract SoulboundERC721 is ERC721, IERC5192, AccessControl {
      * @dev Block approvals for soulbound tokens
      */
     function _approve(address to, uint256 tokenId, address auth, bool emitEvent) internal virtual override {
-        if (to != address(0)) {
-            revert Soulbound();
-        }
+        if (to != address(0)) revert Soulbound();
         super._approve(to, tokenId, auth, emitEvent);
     }
 
@@ -176,9 +161,7 @@ abstract contract SoulboundERC721 is ERC721, IERC5192, AccessControl {
      * @dev Block operator approvals for soulbound tokens
      */
     function _setApprovalForAll(address owner, address operator, bool approved) internal virtual override {
-        if (approved) {
-            revert Soulbound();
-        }
+        if (approved) revert Soulbound();
         super._setApprovalForAll(owner, operator, approved);
     }
 
@@ -200,11 +183,7 @@ contract StakePactRegistry is AccessControl {
     mapping(bytes32 => Pact) internal _pacts;
 
     event PactCreated(
-        bytes32 indexed pactId,
-        bytes32 indexed issuerId,
-        bytes32 indexed contentHash,
-        string uri,
-        string pactVersion
+        bytes32 indexed pactId, bytes32 indexed issuerId, bytes32 indexed contentHash, string uri, string pactVersion
     );
     event PactAmended(bytes32 indexed oldPactId, bytes32 indexed newPactId);
 
@@ -220,7 +199,11 @@ contract StakePactRegistry is AccessControl {
         bytes32 issuerId,
         bytes32 contentHash,
         string calldata pactVersion
-    ) public pure returns (bytes32) {
+    )
+        public
+        pure
+        returns (bytes32)
+    {
         return keccak256(abi.encode(issuerId, contentHash, keccak256(bytes(pactVersion))));
     }
 
@@ -255,7 +238,11 @@ contract StakePactRegistry is AccessControl {
         bool mutablePact,
         RevocationMode revocationMode,
         bool defaultRevocableUnvested
-    ) external onlyRole(OPERATOR_ROLE) returns (bytes32) {
+    )
+        external
+        onlyRole(OPERATOR_ROLE)
+        returns (bytes32)
+    {
         bytes32 pactId = computePactId(issuerId, contentHash, pactVersion);
 
         if (_pacts[pactId].pactId != bytes32(0)) revert PactAlreadyExists();
@@ -287,7 +274,11 @@ contract StakePactRegistry is AccessControl {
         bytes32 newRightsRoot,
         string calldata newUri,
         string calldata newPactVersion
-    ) external onlyRole(OPERATOR_ROLE) returns (bytes32) {
+    )
+        external
+        onlyRole(OPERATOR_ROLE)
+        returns (bytes32)
+    {
         Pact storage oldP = _pacts[oldPactId];
         if (oldP.pactId == bytes32(0)) revert PactNotFound();
         if (!oldP.mutablePact) revert PactImmutable();
@@ -330,11 +321,7 @@ contract SoulboundClaim is SoulboundERC721 {
     uint256 public nextId = 1;
 
     event ClaimIssued(
-        uint256 indexed claimId,
-        bytes32 indexed pactId,
-        address indexed to,
-        uint256 maxUnits,
-        uint64 redeemableAt
+        uint256 indexed claimId, bytes32 indexed pactId, address indexed to, uint256 maxUnits, uint64 redeemableAt
     );
     event ClaimVoided(uint256 indexed claimId, bytes32 reasonHash);
     event ClaimRedeemed(uint256 indexed claimId, bytes32 reasonHash);
@@ -343,7 +330,9 @@ contract SoulboundClaim is SoulboundERC721 {
         address issuer_,
         bytes32 issuerId_,
         StakePactRegistry registry_
-    ) SoulboundERC721("Stake Claim", "sCLAIM", issuer_, issuerId_) {
+    )
+        SoulboundERC721("Stake Claim", "sCLAIM", issuer_, issuerId_)
+    {
         REGISTRY = registry_;
     }
 
@@ -363,7 +352,11 @@ contract SoulboundClaim is SoulboundERC721 {
         bytes32 pactId,
         uint256 maxUnits,
         uint64 redeemableAt
-    ) external onlyRole(ISSUER_ROLE) returns (uint256) {
+    )
+        external
+        onlyRole(ISSUER_ROLE)
+        returns (uint256)
+    {
         if (to == address(0)) revert InvalidRecipient();
         if (maxUnits == 0) revert InvalidUnits();
 
@@ -443,19 +436,16 @@ contract SoulboundStake is SoulboundERC721 {
 
     uint256 public nextId = 1;
 
-    event StakeMinted(
-        uint256 indexed stakeId,
-        bytes32 indexed pactId,
-        address indexed to,
-        uint256 units
-    );
+    event StakeMinted(uint256 indexed stakeId, bytes32 indexed pactId, address indexed to, uint256 units);
     event StakeRevoked(uint256 indexed stakeId, bytes32 reasonHash);
 
     constructor(
         address issuer_,
         bytes32 issuerId_,
         StakePactRegistry registry_
-    ) SoulboundERC721("Stake Certificate", "sSTAKE", issuer_, issuerId_) {
+    )
+        SoulboundERC721("Stake Certificate", "sSTAKE", issuer_, issuerId_)
+    {
         REGISTRY = registry_;
     }
 
@@ -475,20 +465,14 @@ contract SoulboundStake is SoulboundERC721 {
 
         StakeState storage s = _stakes[stakeId];
 
-        if (block.timestamp < s.vestCliff) {
-            return 0;
-        }
-        if (block.timestamp >= s.vestEnd) {
-            return s.units;
-        }
+        if (block.timestamp < s.vestCliff) return 0;
+        if (block.timestamp >= s.vestEnd) return s.units;
 
         // Linear vesting between vestStart and vestEnd
         uint256 elapsed = block.timestamp - s.vestStart;
         uint256 duration = s.vestEnd - s.vestStart;
 
-        if (duration == 0) {
-            return s.units;
-        }
+        if (duration == 0) return s.units;
 
         return (s.units * elapsed) / duration;
     }
@@ -512,7 +496,11 @@ contract SoulboundStake is SoulboundERC721 {
         uint64 vestCliff,
         uint64 vestEnd,
         bool revocableUnvested
-    ) external onlyRole(ISSUER_ROLE) returns (uint256) {
+    )
+        external
+        onlyRole(ISSUER_ROLE)
+        returns (uint256)
+    {
         if (to == address(0)) revert InvalidRecipient();
         if (units == 0) revert InvalidUnits();
         if (!(vestStart <= vestCliff && vestCliff <= vestEnd)) revert InvalidVesting();
@@ -599,11 +587,7 @@ contract StakeCertificates is AccessControl {
     mapping(bytes32 => uint256) public stakeIdByRedemptionId;
     mapping(bytes32 => bytes32) public stakeParamsHashByRedemptionId;
 
-    event Redeemed(
-        bytes32 indexed redemptionId,
-        uint256 indexed claimId,
-        uint256 indexed stakeId
-    );
+    event Redeemed(bytes32 indexed redemptionId, uint256 indexed claimId, uint256 indexed stakeId);
 
     constructor(address authority) {
         AUTHORITY = authority;
@@ -628,7 +612,11 @@ contract StakeCertificates is AccessControl {
         bool mutablePact,
         RevocationMode revocationMode,
         bool defaultRevocableUnvested
-    ) external onlyRole(AUTHORITY_ROLE) returns (bytes32) {
+    )
+        external
+        onlyRole(AUTHORITY_ROLE)
+        returns (bytes32)
+    {
         return REGISTRY.createPact(
             ISSUER_ID,
             AUTHORITY,
@@ -651,14 +639,12 @@ contract StakeCertificates is AccessControl {
         bytes32 newRightsRoot,
         string calldata newUri,
         string calldata newPactVersion
-    ) external onlyRole(AUTHORITY_ROLE) returns (bytes32) {
-        return REGISTRY.amendPact(
-            oldPactId,
-            newContentHash,
-            newRightsRoot,
-            newUri,
-            newPactVersion
-        );
+    )
+        external
+        onlyRole(AUTHORITY_ROLE)
+        returns (bytes32)
+    {
+        return REGISTRY.amendPact(oldPactId, newContentHash, newRightsRoot, newUri, newPactVersion);
     }
 
     /**
@@ -670,14 +656,16 @@ contract StakeCertificates is AccessControl {
         bytes32 pactId,
         uint256 maxUnits,
         uint64 redeemableAt
-    ) external onlyRole(AUTHORITY_ROLE) returns (uint256) {
+    )
+        external
+        onlyRole(AUTHORITY_ROLE)
+        returns (uint256)
+    {
         bytes32 paramsHash = keccak256(abi.encode(to, pactId, maxUnits, redeemableAt));
 
         uint256 existing = claimIdByIssuanceId[issuanceId];
         if (existing != 0) {
-            if (claimParamsHashByIssuanceId[issuanceId] != paramsHash) {
-                revert IdempotenceMismatch();
-            }
+            if (claimParamsHashByIssuanceId[issuanceId] != paramsHash) revert IdempotenceMismatch();
             return existing;
         }
 
@@ -707,16 +695,16 @@ contract StakeCertificates is AccessControl {
         uint64 vestCliff,
         uint64 vestEnd,
         bytes32 reasonHash
-    ) external onlyRole(AUTHORITY_ROLE) returns (uint256) {
-        bytes32 paramsHash = keccak256(
-            abi.encode(claimId, units, vestStart, vestCliff, vestEnd, reasonHash)
-        );
+    )
+        external
+        onlyRole(AUTHORITY_ROLE)
+        returns (uint256)
+    {
+        bytes32 paramsHash = keccak256(abi.encode(claimId, units, vestStart, vestCliff, vestEnd, reasonHash));
 
         uint256 existing = stakeIdByRedemptionId[redemptionId];
         if (existing != 0) {
-            if (stakeParamsHashByRedemptionId[redemptionId] != paramsHash) {
-                revert IdempotenceMismatch();
-            }
+            if (stakeParamsHashByRedemptionId[redemptionId] != paramsHash) revert IdempotenceMismatch();
             return existing;
         }
 
@@ -725,9 +713,7 @@ contract StakeCertificates is AccessControl {
 
         ClaimState memory c = CLAIM.getClaim(claimId);
         if (c.voided || c.redeemed) revert ClaimNotRedeemable();
-        if (c.redeemableAt != 0 && block.timestamp < c.redeemableAt) {
-            revert ClaimNotRedeemable();
-        }
+        if (c.redeemableAt != 0 && block.timestamp < c.redeemableAt) revert ClaimNotRedeemable();
         if (units == 0 || units > c.maxUnits) revert InvalidUnits();
 
         bytes32 pactId = CLAIM.claimPact(claimId);
@@ -735,15 +721,7 @@ contract StakeCertificates is AccessControl {
 
         address to = CLAIM.ownerOf(claimId);
 
-        uint256 stakeId = STAKE.mintStake(
-            to,
-            pactId,
-            units,
-            vestStart,
-            vestCliff,
-            vestEnd,
-            p.defaultRevocableUnvested
-        );
+        uint256 stakeId = STAKE.mintStake(to, pactId, units, vestStart, vestCliff, vestEnd, p.defaultRevocableUnvested);
 
         CLAIM.markRedeemed(claimId, reasonHash);
 
