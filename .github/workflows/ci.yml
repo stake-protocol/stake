@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  FOUNDRY_PROFILE: ci
+  FOUNDRY_PROFILE: default
 
 jobs:
   build:
