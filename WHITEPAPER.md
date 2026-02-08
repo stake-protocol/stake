@@ -339,6 +339,16 @@ Controlled issuance requires controls. The protocol provides five layers of prot
 
 **Optional preemptive rights.** Projects can enable preemptive rights, giving existing token holders the first right to purchase new issuance at the offering price, proportional to their current holdings. This prevents dilution of ownership percentage for holders who want to maintain their position.
 
+### VII.H. Protocol Fee
+
+At transition, the protocol takes a 1% fee denominated in the project's newly minted tokens. This fee is immutable — encoded in the Vault contract with no admin override, no waiver, and no way to change it after deployment.
+
+The fee tokens are governance-excluded: they cannot vote, cannot bid on governance seats, and carry no governance power. The protocol cannot accumulate influence over the projects it serves.
+
+The fee tokens are liquidated autonomously via an immutable, permissionless contract. The schedule matches insider lockup (90 days), followed by a 12-month linear sell-off through the project's own liquidity pool. Anyone can trigger the sell. No one can stop it. The schedule is public, verifiable, and predictable — founders can model the exact sell pressure on any given day.
+
+This is the protocol's revenue model. It is not hidden, it is not configurable, and it is not negotiable. If it matters, encode it.
+
 ---
 
 ## VIII. Why Controlled Inflation, Not Fixed Supply
