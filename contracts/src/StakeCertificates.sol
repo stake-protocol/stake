@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 /**
@@ -33,6 +34,10 @@ error InvalidRecipient();
 error InvalidUnits();
 error IdempotenceMismatch();
 error StakeFullyVested();
+error AlreadyTransitioned();
+error NotTransitioned();
+error VaultAlreadySet();
+error InvalidVault();
 
 // ============ Enums ============
 
@@ -70,6 +75,7 @@ struct ClaimState {
     bool redeemed;
     uint64 issuedAt;
     uint64 redeemableAt;
+    UnitType unitType;
     uint256 maxUnits;
     bytes32 reasonHash;
 }
@@ -80,8 +86,11 @@ struct StakeState {
     uint64 vestStart;
     uint64 vestCliff;
     uint64 vestEnd;
+    uint64 revokedAt;
     bool revocableUnvested;
+    UnitType unitType;
     uint256 units;
+    uint256 revokedUnits;
     bytes32 reasonHash;
 }
 
@@ -90,14 +99,17 @@ struct StakeState {
 /**
  * @title SoulboundERC721
  * @notice Non-transferable ERC721 base contract implementing ERC-5192
- * @dev Uses OpenZeppelin v5 _update hook to block transfers
+ * @dev Uses OpenZeppelin v5 _update hook to block transfers.
+ *      Vault address can bypass soulbound restriction for governance seat management.
  */
-abstract contract SoulboundERC721 is ERC721, IERC5192, AccessControl {
+abstract contract SoulboundERC721 is ERC721, IERC5192, AccessControl, Pausable {
     bytes32 public constant ISSUER_ROLE = keccak256("ISSUER_ROLE");
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
     address public immutable ISSUER;
     bytes32 public immutable ISSUER_ID;
 
+    address internal _vault;
     string internal _baseTokenURI;
 
     constructor(string memory name_, string memory symbol_, address issuer_, bytes32 issuerId_) ERC721(name_, symbol_) {
@@ -105,12 +117,29 @@ abstract contract SoulboundERC721 is ERC721, IERC5192, AccessControl {
         ISSUER_ID = issuerId_;
         _grantRole(DEFAULT_ADMIN_ROLE, issuer_);
         _grantRole(ISSUER_ROLE, issuer_);
+        _grantRole(PAUSER_ROLE, issuer_);
     }
 
     /**
-     * @notice Returns whether a token is locked (always true for soulbound tokens)
+     * @notice Set the vault address. Can only be called once, by the issuer.
+     */
+    function setVault(address vault_) external onlyRole(ISSUER_ROLE) {
+        if (_vault != address(0)) revert VaultAlreadySet();
+        if (vault_ == address(0)) revert InvalidVault();
+        _vault = vault_;
+    }
+
+    /**
+     * @notice Get the vault address
+     */
+    function vault() external view returns (address) {
+        return _vault;
+    }
+
+    /**
+     * @notice Returns whether a token is locked (soulbound)
      * @param tokenId The token ID to check
-     * @return bool Always returns true if token exists
+     * @return bool True if the token is locked (always true unless vault-managed)
      */
     function locked(uint256 tokenId) external view returns (bool) {
         if (_ownerOf(tokenId) == address(0)) revert TokenNotFound();
@@ -137,14 +166,34 @@ abstract contract SoulboundERC721 is ERC721, IERC5192, AccessControl {
     }
 
     /**
-     * @dev Override _update to block all transfers except minting
-     * In OpenZeppelin v5, _update is called for all token operations
+     * @notice Pause all state-changing operations
+     */
+    function pause() external onlyRole(PAUSER_ROLE) {
+        _pause();
+    }
+
+    /**
+     * @notice Unpause operations
+     */
+    function unpause() external onlyRole(PAUSER_ROLE) {
+        _unpause();
+    }
+
+    /**
+     * @dev Override _update to enforce soulbound transfers.
+     *      Minting (from == 0) and burning (to == 0) are allowed.
+     *      Transfers are only allowed when initiated by the vault contract.
      */
     function _update(address to, uint256 tokenId, address auth) internal virtual override returns (address) {
         address from = _ownerOf(tokenId);
 
-        // Allow minting (from == address(0)), block transfers
-        if (from != address(0) && to != address(0)) revert Soulbound();
+        // Allow minting (from == 0). Block transfers unless vault-initiated.
+        if (from != address(0) && to != address(0)) {
+            _requireNotPaused();
+            if (auth != _vault) revert Soulbound();
+            // Vault bypass: skip standard auth check
+            return super._update(to, tokenId, address(0));
+        }
 
         return super._update(to, tokenId, auth);
     }
@@ -321,7 +370,12 @@ contract SoulboundClaim is SoulboundERC721 {
     uint256 public nextId = 1;
 
     event ClaimIssued(
-        uint256 indexed claimId, bytes32 indexed pactId, address indexed to, uint256 maxUnits, uint64 redeemableAt
+        uint256 indexed claimId,
+        bytes32 indexed pactId,
+        address indexed to,
+        uint256 maxUnits,
+        UnitType unitType,
+        uint64 redeemableAt
     );
     event ClaimVoided(uint256 indexed claimId, bytes32 reasonHash);
     event ClaimRedeemed(uint256 indexed claimId, bytes32 reasonHash);
@@ -351,10 +405,12 @@ contract SoulboundClaim is SoulboundERC721 {
         address to,
         bytes32 pactId,
         uint256 maxUnits,
+        UnitType unitType,
         uint64 redeemableAt
     )
         external
         onlyRole(ISSUER_ROLE)
+        whenNotPaused
         returns (uint256)
     {
         if (to == address(0)) revert InvalidRecipient();
@@ -371,19 +427,20 @@ contract SoulboundClaim is SoulboundERC721 {
             redeemed: false,
             issuedAt: uint64(block.timestamp),
             redeemableAt: redeemableAt,
+            unitType: unitType,
             maxUnits: maxUnits,
             reasonHash: bytes32(0)
         });
 
         _mintSoulbound(to, id);
-        emit ClaimIssued(id, pactId, to, maxUnits, redeemableAt);
+        emit ClaimIssued(id, pactId, to, maxUnits, unitType, redeemableAt);
         return id;
     }
 
     /**
      * @notice Void a claim
      */
-    function voidClaim(uint256 claimId, bytes32 reasonHash) external onlyRole(ISSUER_ROLE) {
+    function voidClaim(uint256 claimId, bytes32 reasonHash) external onlyRole(ISSUER_ROLE) whenNotPaused {
         if (_ownerOf(claimId) == address(0)) revert ClaimNotFound();
 
         ClaimState storage c = _claims[claimId];
@@ -402,7 +459,7 @@ contract SoulboundClaim is SoulboundERC721 {
     /**
      * @notice Mark a claim as redeemed (called by StakeCertificates)
      */
-    function markRedeemed(uint256 claimId, bytes32 reasonHash) external onlyRole(ISSUER_ROLE) {
+    function markRedeemed(uint256 claimId, bytes32 reasonHash) external onlyRole(ISSUER_ROLE) whenNotPaused {
         if (_ownerOf(claimId) == address(0)) revert ClaimNotFound();
 
         ClaimState storage c = _claims[claimId];
@@ -426,7 +483,7 @@ contract SoulboundClaim is SoulboundERC721 {
 
 /**
  * @title SoulboundStake
- * @notice Non-transferable stake certificates
+ * @notice Non-transferable stake certificates with corrected revocation logic
  */
 contract SoulboundStake is SoulboundERC721 {
     StakePactRegistry public immutable REGISTRY;
@@ -436,8 +493,10 @@ contract SoulboundStake is SoulboundERC721 {
 
     uint256 public nextId = 1;
 
-    event StakeMinted(uint256 indexed stakeId, bytes32 indexed pactId, address indexed to, uint256 units);
-    event StakeRevoked(uint256 indexed stakeId, bytes32 reasonHash);
+    event StakeMinted(
+        uint256 indexed stakeId, bytes32 indexed pactId, address indexed to, uint256 units, UnitType unitType
+    );
+    event StakeRevoked(uint256 indexed stakeId, uint256 revokedUnits, uint256 retainedUnits, bytes32 reasonHash);
 
     constructor(
         address issuer_,
@@ -458,12 +517,16 @@ contract SoulboundStake is SoulboundERC721 {
     }
 
     /**
-     * @notice Calculate vested units for a stake
+     * @notice Calculate vested units for a stake.
+     *         For revoked stakes, returns the snapshot at revocation time.
      */
     function vestedUnits(uint256 stakeId) public view returns (uint256) {
         if (_ownerOf(stakeId) == address(0)) revert StakeNotFound();
 
         StakeState storage s = _stakes[stakeId];
+
+        // Revoked stakes return the retained units (already set to vested amount at revocation)
+        if (s.revoked) return s.units;
 
         if (block.timestamp < s.vestCliff) return 0;
         if (block.timestamp >= s.vestEnd) return s.units;
@@ -478,10 +541,17 @@ contract SoulboundStake is SoulboundERC721 {
     }
 
     /**
-     * @notice Calculate unvested units for a stake
+     * @notice Calculate unvested units for a stake.
+     *         For revoked stakes, returns 0 (unvested portion was removed).
      */
     function unvestedUnits(uint256 stakeId) public view returns (uint256) {
+        if (_ownerOf(stakeId) == address(0)) revert StakeNotFound();
+
         StakeState storage s = _stakes[stakeId];
+
+        // Revoked stakes have no unvested portion
+        if (s.revoked) return 0;
+
         return s.units - vestedUnits(stakeId);
     }
 
@@ -492,6 +562,7 @@ contract SoulboundStake is SoulboundERC721 {
         address to,
         bytes32 pactId,
         uint256 units,
+        UnitType unitType,
         uint64 vestStart,
         uint64 vestCliff,
         uint64 vestEnd,
@@ -499,6 +570,7 @@ contract SoulboundStake is SoulboundERC721 {
     )
         external
         onlyRole(ISSUER_ROLE)
+        whenNotPaused
         returns (uint256)
     {
         if (to == address(0)) revert InvalidRecipient();
@@ -517,20 +589,25 @@ contract SoulboundStake is SoulboundERC721 {
             vestStart: vestStart,
             vestCliff: vestCliff,
             vestEnd: vestEnd,
+            revokedAt: 0,
             revocableUnvested: revocableUnvested,
+            unitType: unitType,
             units: units,
+            revokedUnits: 0,
             reasonHash: bytes32(0)
         });
 
         _mintSoulbound(to, id);
-        emit StakeMinted(id, pactId, to, units);
+        emit StakeMinted(id, pactId, to, units, unitType);
         return id;
     }
 
     /**
-     * @notice Revoke a stake (only unvested portion if UNVESTED_ONLY mode)
+     * @notice Revoke a stake.
+     *         UNVESTED_ONLY: snapshots vested amount, reduces units to vested, records revoked.
+     *         ANY: revokes the full stake (vested and unvested), sets units to 0.
      */
-    function revokeStake(uint256 stakeId, bytes32 reasonHash) external onlyRole(ISSUER_ROLE) {
+    function revokeStake(uint256 stakeId, bytes32 reasonHash) external onlyRole(ISSUER_ROLE) whenNotPaused {
         if (_ownerOf(stakeId) == address(0)) revert StakeNotFound();
 
         StakeState storage s = _stakes[stakeId];
@@ -542,17 +619,40 @@ contract SoulboundStake is SoulboundERC721 {
         if (p.revocationMode == RevocationMode.NONE) revert RevocationDisabled();
 
         if (p.revocationMode == RevocationMode.UNVESTED_ONLY) {
-            // Check that the stake has the revocableUnvested flag
             if (!s.revocableUnvested) revert RevocationDisabled();
 
-            // Check that there are actually unvested units to revoke
-            uint256 unvested = unvestedUnits(stakeId);
-            if (unvested == 0) revert StakeFullyVested();
+            // Calculate vested units at this moment
+            uint256 vested = _calculateVestedUnits(s);
+            if (vested >= s.units) revert StakeFullyVested();
+
+            // Snapshot: retain vested, revoke unvested
+            uint256 unvested = s.units - vested;
+            s.revokedUnits = unvested;
+            s.units = vested;
+        } else {
+            // RevocationMode.ANY: revoke everything
+            s.revokedUnits = s.units;
+            s.units = 0;
         }
 
         s.revoked = true;
+        s.revokedAt = uint64(block.timestamp);
         s.reasonHash = reasonHash;
-        emit StakeRevoked(stakeId, reasonHash);
+        emit StakeRevoked(stakeId, s.revokedUnits, s.units, reasonHash);
+    }
+
+    /**
+     * @dev Internal vesting calculation (does not check revoked status)
+     */
+    function _calculateVestedUnits(StakeState storage s) internal view returns (uint256) {
+        if (block.timestamp < s.vestCliff) return 0;
+        if (block.timestamp >= s.vestEnd) return s.units;
+
+        uint256 elapsed = block.timestamp - s.vestStart;
+        uint256 duration = s.vestEnd - s.vestStart;
+        if (duration == 0) return s.units;
+
+        return (s.units * elapsed) / duration;
     }
 
     /**
@@ -567,10 +667,13 @@ contract SoulboundStake is SoulboundERC721 {
 
 /**
  * @title StakeCertificates
- * @notice Main entry point for issuing and managing stake certificates
+ * @notice Main entry point for issuing and managing stake certificates.
+ *         Pre-transition: issuer controls all operations.
+ *         Post-transition: issuer powers freeze permanently.
  */
-contract StakeCertificates is AccessControl {
+contract StakeCertificates is AccessControl, Pausable {
     bytes32 public constant AUTHORITY_ROLE = keccak256("AUTHORITY_ROLE");
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
     address public immutable AUTHORITY;
     bytes32 public immutable ISSUER_ID;
@@ -578,6 +681,8 @@ contract StakeCertificates is AccessControl {
     StakePactRegistry public immutable REGISTRY;
     SoulboundClaim public immutable CLAIM;
     SoulboundStake public immutable STAKE;
+
+    bool public transitioned;
 
     // Idempotence mappings for claims
     mapping(bytes32 => uint256) public claimIdByIssuanceId;
@@ -588,6 +693,12 @@ contract StakeCertificates is AccessControl {
     mapping(bytes32 => bytes32) public stakeParamsHashByRedemptionId;
 
     event Redeemed(bytes32 indexed redemptionId, uint256 indexed claimId, uint256 indexed stakeId);
+    event TransitionInitiated(address indexed vault, uint64 timestamp);
+
+    modifier whenNotTransitioned() {
+        if (transitioned) revert AlreadyTransitioned();
+        _;
+    }
 
     constructor(address authority) {
         AUTHORITY = authority;
@@ -595,10 +706,45 @@ contract StakeCertificates is AccessControl {
 
         _grantRole(DEFAULT_ADMIN_ROLE, authority);
         _grantRole(AUTHORITY_ROLE, authority);
+        _grantRole(PAUSER_ROLE, authority);
 
         REGISTRY = new StakePactRegistry(authority, address(this));
         CLAIM = new SoulboundClaim(address(this), ISSUER_ID, REGISTRY);
         STAKE = new SoulboundStake(address(this), ISSUER_ID, REGISTRY);
+    }
+
+    /**
+     * @notice Pause all state-changing operations
+     */
+    function pause() external onlyRole(PAUSER_ROLE) {
+        _pause();
+        CLAIM.pause();
+        STAKE.pause();
+    }
+
+    /**
+     * @notice Unpause operations
+     */
+    function unpause() external onlyRole(PAUSER_ROLE) {
+        _unpause();
+        CLAIM.unpause();
+        STAKE.unpause();
+    }
+
+    /**
+     * @notice Initiate transition. Sets vault on child contracts and freezes issuer powers.
+     * @param vault_ The vault contract address that will custody certificates post-transition.
+     */
+    function initiateTransition(address vault_) external onlyRole(AUTHORITY_ROLE) whenNotTransitioned whenNotPaused {
+        if (vault_ == address(0)) revert InvalidVault();
+
+        transitioned = true;
+
+        // Set vault on child contracts so they allow vault-initiated transfers
+        CLAIM.setVault(vault_);
+        STAKE.setVault(vault_);
+
+        emit TransitionInitiated(vault_, uint64(block.timestamp));
     }
 
     /**
@@ -615,6 +761,8 @@ contract StakeCertificates is AccessControl {
     )
         external
         onlyRole(AUTHORITY_ROLE)
+        whenNotTransitioned
+        whenNotPaused
         returns (bytes32)
     {
         return REGISTRY.createPact(
@@ -642,6 +790,8 @@ contract StakeCertificates is AccessControl {
     )
         external
         onlyRole(AUTHORITY_ROLE)
+        whenNotTransitioned
+        whenNotPaused
         returns (bytes32)
     {
         return REGISTRY.amendPact(oldPactId, newContentHash, newRightsRoot, newUri, newPactVersion);
@@ -655,13 +805,16 @@ contract StakeCertificates is AccessControl {
         address to,
         bytes32 pactId,
         uint256 maxUnits,
+        UnitType unitType,
         uint64 redeemableAt
     )
         external
         onlyRole(AUTHORITY_ROLE)
+        whenNotTransitioned
+        whenNotPaused
         returns (uint256)
     {
-        bytes32 paramsHash = keccak256(abi.encode(to, pactId, maxUnits, redeemableAt));
+        bytes32 paramsHash = keccak256(abi.encode(to, pactId, maxUnits, unitType, redeemableAt));
 
         uint256 existing = claimIdByIssuanceId[issuanceId];
         if (existing != 0) {
@@ -669,7 +822,7 @@ contract StakeCertificates is AccessControl {
             return existing;
         }
 
-        uint256 claimId = CLAIM.issueClaim(to, pactId, maxUnits, redeemableAt);
+        uint256 claimId = CLAIM.issueClaim(to, pactId, maxUnits, unitType, redeemableAt);
         claimIdByIssuanceId[issuanceId] = claimId;
         claimParamsHashByIssuanceId[issuanceId] = paramsHash;
         return claimId;
@@ -678,7 +831,15 @@ contract StakeCertificates is AccessControl {
     /**
      * @notice Void a claim by issuance ID
      */
-    function voidClaim(bytes32 issuanceId, bytes32 reasonHash) external onlyRole(AUTHORITY_ROLE) {
+    function voidClaim(
+        bytes32 issuanceId,
+        bytes32 reasonHash
+    )
+        external
+        onlyRole(AUTHORITY_ROLE)
+        whenNotTransitioned
+        whenNotPaused
+    {
         uint256 claimId = claimIdByIssuanceId[issuanceId];
         if (claimId == 0) revert ClaimNotFound();
         CLAIM.voidClaim(claimId, reasonHash);
@@ -691,6 +852,7 @@ contract StakeCertificates is AccessControl {
         bytes32 redemptionId,
         uint256 claimId,
         uint256 units,
+        UnitType unitType,
         uint64 vestStart,
         uint64 vestCliff,
         uint64 vestEnd,
@@ -698,9 +860,11 @@ contract StakeCertificates is AccessControl {
     )
         external
         onlyRole(AUTHORITY_ROLE)
+        whenNotTransitioned
+        whenNotPaused
         returns (uint256)
     {
-        bytes32 paramsHash = keccak256(abi.encode(claimId, units, vestStart, vestCliff, vestEnd, reasonHash));
+        bytes32 paramsHash = keccak256(abi.encode(claimId, units, unitType, vestStart, vestCliff, vestEnd, reasonHash));
 
         uint256 existing = stakeIdByRedemptionId[redemptionId];
         if (existing != 0) {
@@ -715,13 +879,15 @@ contract StakeCertificates is AccessControl {
         if (c.voided || c.redeemed) revert ClaimNotRedeemable();
         if (c.redeemableAt != 0 && block.timestamp < c.redeemableAt) revert ClaimNotRedeemable();
         if (units == 0 || units > c.maxUnits) revert InvalidUnits();
+        if (unitType != c.unitType) revert InvalidUnits();
 
         bytes32 pactId = CLAIM.claimPact(claimId);
         Pact memory p = REGISTRY.getPact(pactId);
 
         address to = CLAIM.ownerOf(claimId);
 
-        uint256 stakeId = STAKE.mintStake(to, pactId, units, vestStart, vestCliff, vestEnd, p.defaultRevocableUnvested);
+        uint256 stakeId =
+            STAKE.mintStake(to, pactId, units, unitType, vestStart, vestCliff, vestEnd, p.defaultRevocableUnvested);
 
         CLAIM.markRedeemed(claimId, reasonHash);
 
@@ -733,9 +899,17 @@ contract StakeCertificates is AccessControl {
     }
 
     /**
-     * @notice Revoke a stake
+     * @notice Revoke a stake. Pre-transition only.
      */
-    function revokeStake(uint256 stakeId, bytes32 reasonHash) external onlyRole(AUTHORITY_ROLE) {
+    function revokeStake(
+        uint256 stakeId,
+        bytes32 reasonHash
+    )
+        external
+        onlyRole(AUTHORITY_ROLE)
+        whenNotTransitioned
+        whenNotPaused
+    {
         STAKE.revokeStake(stakeId, reasonHash);
     }
 

@@ -1,6 +1,6 @@
 # Stake Protocol — Soulbound Equity Certificates
 
-Status: Draft v0.2
+Status: Draft v0.3
 
 ## 1. Abstract
 
@@ -721,15 +721,98 @@ After transition, three acquisition paths exist:
 
 **Governance seat accumulation**: The acquirer bids on the target's governance seats over multiple term cycles, gradually gaining majority control.
 
-## 18. Reference Implementation
+## 18. Protocol Fee
+
+### 18.1 Fee Structure
+
+The protocol charges an immutable 1% fee on tokens minted during transition. This fee is encoded in the Vault contract and cannot be modified, waived, or disabled.
+
+When the Vault processes the transition batch, it MUST:
+1. Calculate the total tokens minted for certificate holders in that batch.
+2. Mint an additional 1% of that amount (100 basis points, base 10,000).
+3. Transfer the fee tokens to the `ProtocolFeeLiquidator` contract.
+
+The fee is denominated in the project's own tokens, not ETH or stablecoins.
+
+### 18.2 Governance Exclusion
+
+Protocol fee tokens MUST NOT carry governance rights. The `StakeToken` contract MUST expose a `governanceBalance(address)` function that returns 0 for governance-excluded addresses. The protocol fee address MUST be permanently excluded from governance voting and governance seat bidding.
+
+This is a structural property encoded in the token contract, not a policy decision. It ensures the protocol cannot accumulate governance power across projects.
+
+### 18.3 Protocol Fee Liquidator
+
+The `ProtocolFeeLiquidator` is an autonomous, immutable contract deployed per-project during transition. It receives the 1% fee tokens and liquidates them on a fixed schedule.
+
+**Properties:**
+- **Immutable**: No admin functions, no pause, no override, no upgradability. Once deployed, it runs to completion.
+- **Permissionless**: Anyone can call `liquidate()` — MEV bots, keepers, the protocol team, any address. The outcome is deterministic regardless of caller.
+- **Predictable**: Anyone can calculate exactly how many tokens will be sold on any given day.
+- **Transparent**: Every sale is an on-chain swap through a known router.
+
+**Schedule:**
+| Phase | Duration | Behavior |
+| --- | --- | --- |
+| Lockup | 90 days from transition | No tokens released. Same lockup as all insiders. |
+| Linear vesting | 12 months after lockup | Tokens unlock linearly, available for liquidation. |
+| Total | 15 months | All fee tokens fully liquidated. |
+
+The 90-day lockup matches the standard insider lockup period. The protocol follows the same rules as every other holder.
+
+**Liquidation mechanics:**
+1. `releasable()` returns the number of tokens currently unlocked but not yet sold.
+2. `liquidate()` sells all releasable tokens through the pre-configured swap router.
+3. Sale proceeds go directly to the protocol treasury address.
+4. If the router fails (no liquidity, pool paused), tokens accumulate and can be sold later.
+
+The swap router is set at deployment time — it is the AMM pool seeded by the transition's initial liquidity (see §12.6). The router address is immutable after deployment.
+
+**Liquidator interface:**
+```solidity
+interface IProtocolFeeLiquidator {
+    function releasable() external view returns (uint256);
+    function liquidate() external returns (uint256 tokensSold, uint256 proceeds);
+    function schedule() external view returns (
+        uint256 totalTokens,
+        uint256 totalReleased,
+        uint256 releasable_,
+        uint64 lockupEnd,
+        uint64 vestingEnd,
+        uint16 percentComplete
+    );
+    function initialize() external;
+}
+```
+
+**Liquidation router interface:**
+```solidity
+interface ILiquidationRouter {
+    function liquidate(address tokenIn, uint256 amountIn, address recipient) external returns (uint256 amountOut);
+}
+```
+
+Implementations of `ILiquidationRouter` wrap a specific DEX (Uniswap V2/V3, etc.) and handle routing, slippage, and execution. The reference implementation provides the interface; production deployments implement the router for their chosen DEX.
+
+### 18.4 Rationale
+
+The auto-sell is encoded rather than left to policy for the same reason soulbound status is encoded: if it matters, it must be trustless. A founder evaluating Stake Protocol should not need to trust the protocol team's liquidation promises. The schedule is verifiable, the mechanism is permissionless, and the outcome is guaranteed by code.
+
+The 1% rate is set to remain below the fork-rationality threshold. Existing certificates reference the original contract addresses; forking the protocol at transition time does not migrate existing stakes. The cost of forking (independent audit, ecosystem integration, credibility) exceeds the 1% fee for any project below approximately $100M in token value.
+
+## 19. Reference Implementation
 
 This is a compact, auditable reference implementation intended as a readable baseline. Production deployments MUST be independently audited.
 
-See [contracts/src/StakeCertificates.sol](../contracts/src/StakeCertificates.sol) for the pre-transition reference implementation.
+The reference implementation consists of:
 
-The post-transition contracts (Vault, Token, Governance) are specified in §12-§15 and will be provided as separate reference implementations.
+| Contract | File | Purpose |
+| --- | --- | --- |
+| `StakeCertificates` | [contracts/src/StakeCertificates.sol](../contracts/src/StakeCertificates.sol) | Pre-transition coordinator, pact registry, claim and stake management |
+| `StakeToken` | [contracts/src/StakeToken.sol](../contracts/src/StakeToken.sol) | ERC-20 with authorized supply, lockup, governance exclusion |
+| `StakeVault` | [contracts/src/StakeVault.sol](../contracts/src/StakeVault.sol) | Post-transition vault, governance seats, auctions, transition processing |
+| `ProtocolFeeLiquidator` | [contracts/src/ProtocolFeeLiquidator.sol](../contracts/src/ProtocolFeeLiquidator.sol) | Autonomous fee token liquidation |
 
-## 19. Canonical JSON Payloads (Normative Hashing)
+## 20. Canonical JSON Payloads (Normative Hashing)
 
 Canonical encoding rule for any JSON hashed into content_hash, rights_root inputs, params_hash, vestingHash, conversionHash, revocationHash is RFC 8785 (JSON Canonicalization Scheme, JCS), UTF-8.
 
@@ -839,32 +922,32 @@ Vesting schedules:
 }
 ```
 
-## 20. Security and Operational Notes
+## 21. Security and Operational Notes
 
-### 20.1 Authority Separation
+### 21.1 Authority Separation
 
 Issuer authority SHOULD be a multisig. The reference code uses a single issuer role for simplicity.
 
 Conforming implementations SHOULD separate roles:
 - `AUTHORITY_ROLE`: Pact creation, claim issuance, stake conversion
-- `PAUSER_ROLE`: Emergency pause/unpause (see §20.5)
+- `PAUSER_ROLE`: Emergency pause/unpause (see §21.5)
 - `DEFAULT_ADMIN_ROLE`: Role administration
 
-### 20.2 Idempotence
+### 21.2 Idempotence
 
 Conforming implementations MUST be idempotent for issuance and redemption. The reference implementation enforces idempotence via issuanceId and redemptionId mappings that prevent double-mints across retries.
 
-### 20.3 Privacy
+### 21.3 Privacy
 
 Do not store sensitive personal data onchain. Store hashes and URIs only.
 
-### 20.4 Upgrade Path
+### 21.4 Upgrade Path
 
 The reference implementation is not upgradeable. Production deployments SHOULD consider:
 - Proxy patterns for upgradeability
 - Migration paths between contract versions
 
-### 20.5 Emergency Pause
+### 21.5 Emergency Pause
 
 Conforming implementations MUST implement an emergency pause mechanism. When paused, all state-changing functions MUST revert. The pause MUST be controlled by a dedicated `PAUSER_ROLE`, separate from the `AUTHORITY_ROLE`.
 
@@ -872,7 +955,7 @@ RECOMMENDED: Implement OpenZeppelin's `Pausable` with `whenNotPaused` guards on 
 
 Post-transition, the pause authority transfers to governance (certificate holder vote to pause/unpause).
 
-### 20.6 Governance Attack Vectors
+### 21.6 Governance Attack Vectors
 
 Post-transition governance faces several attack vectors:
 
@@ -884,7 +967,7 @@ Post-transition governance faces several attack vectors:
 
 **Transition front-running**: An attacker seeing the transition transaction in the mempool attempts to manipulate state. Mitigated by: transition is a privileged operation (issuer-only) and the batch operation is atomic.
 
-## 21. Compliance Stance
+## 22. Compliance Stance
 
 This standard provides a verifiable certificate record and an optional transition mechanism. It does not claim to be a security issuance framework, and it does not embed any jurisdictional compliance logic.
 
@@ -892,7 +975,7 @@ Issuers are responsible for ensuring compliance with applicable securities laws,
 
 Pre-transition, certificates are non-transferable and issuer-controlled — they function as cap table records, not tradeable instruments. Post-transition, tokens are freely transferable and may be subject to securities regulation depending on jurisdiction.
 
-## 22. References
+## 23. References
 
 - [ERC-721: Non-Fungible Token Standard](https://eips.ethereum.org/EIPS/eip-721)
 - [ERC-20: Token Standard](https://eips.ethereum.org/EIPS/eip-20)
