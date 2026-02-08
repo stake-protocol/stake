@@ -4,13 +4,7 @@ pragma solidity ^0.8.24;
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import {
-    StakeCertificates,
-    SoulboundStake,
-    SoulboundClaim,
-    StakeState,
-    ClaimState
-} from "./StakeCertificates.sol";
+import {StakeCertificates, SoulboundStake, SoulboundClaim, StakeState, ClaimState} from "./StakeCertificates.sol";
 import {StakeToken} from "./StakeToken.sol";
 import {ProtocolFeeLiquidator} from "./ProtocolFeeLiquidator.sol";
 
@@ -276,8 +270,8 @@ contract StakeVault is AccessControl, ReentrancyGuard {
             address(token),
             liquidationRouter,
             protocolFeeAddress,
-            uint64(block.timestamp) + lockupDuration,  // Same lockup as everyone: 90 days
-            365 days                                     // 12-month linear sell
+            uint64(block.timestamp) + lockupDuration, // Same lockup as everyone: 90 days
+            365 days // 12-month linear sell
         );
 
         token.transfer(address(protocolFeeLiquidator), feeTokens);
@@ -329,9 +323,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
         if (newlyVested == 0) return;
 
         cert.tokensClaimed += newlyVested;
-        if (cert.vestedUnitsAtTransition + cert.tokensClaimed >= cert.totalUnits) {
-            cert.tokensFullyClaimed = true;
-        }
+        if (cert.vestedUnitsAtTransition + cert.tokensClaimed >= cert.totalUnits) cert.tokensFullyClaimed = true;
 
         // Mint newly vested tokens and allocate to holder
         token.mint(address(this), newlyVested);
@@ -356,12 +348,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
         uint64 end = start + uint64(auctionDuration);
 
         auctions[certId] = Auction({
-            certId: certId,
-            startTime: start,
-            endTime: end,
-            highestBidder: address(0),
-            highestBid: 0,
-            settled: false
+            certId: certId, startTime: start, endTime: end, highestBidder: address(0), highestBid: 0, settled: false
         });
 
         emit GovernanceSeatAuctionStarted(certId, start, end);
@@ -382,9 +369,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
         if (amount <= a.highestBid) revert BidTooLow();
 
         // Return previous bidder's tokens
-        if (a.highestBidder != address(0)) {
-            token.transfer(a.highestBidder, a.highestBid);
-        }
+        if (a.highestBidder != address(0)) token.transfer(a.highestBidder, a.highestBid);
 
         // Take new bidder's tokens
         token.transferFrom(msg.sender, address(this), amount);
@@ -447,9 +432,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
         totalGovernanceWeight -= s.units;
 
         // Return bid tokens
-        if (bidReturn > 0) {
-            token.transfer(formerGovernor, bidReturn);
-        }
+        if (bidReturn > 0) token.transfer(formerGovernor, bidReturn);
 
         seat.active = false;
         seat.governor = address(0);
@@ -488,11 +471,8 @@ contract StakeVault is AccessControl, ReentrancyGuard {
 
         p.hasVoted[msg.sender] = true;
 
-        if (support) {
-            p.votesFor += weight;
-        } else {
-            p.votesAgainst += weight;
-        }
+        if (support) p.votesFor += weight;
+        else p.votesAgainst += weight;
 
         emit OverrideVoteCast(proposalId, msg.sender, support, weight);
     }
@@ -529,9 +509,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
                 stakeContract.transferFrom(formerGovernor, address(this), certId);
 
                 // Return bid
-                if (seat.bidAmount > 0) {
-                    token.transfer(formerGovernor, seat.bidAmount);
-                }
+                if (seat.bidAmount > 0) token.transfer(formerGovernor, seat.bidAmount);
 
                 seat.active = false;
                 seat.governor = address(0);

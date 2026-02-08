@@ -189,6 +189,7 @@ abstract contract SoulboundERC721 is ERC721, IERC5192, AccessControl, Pausable {
 
         // Allow minting (from == 0). Block transfers unless vault-initiated.
         if (from != address(0) && to != address(0)) {
+            _requireNotPaused();
             if (auth != _vault) revert Soulbound();
             // Vault bypass: skip standard auth check
             return super._update(to, tokenId, address(0));
@@ -717,6 +718,8 @@ contract StakeCertificates is AccessControl, Pausable {
      */
     function pause() external onlyRole(PAUSER_ROLE) {
         _pause();
+        CLAIM.pause();
+        STAKE.pause();
     }
 
     /**
@@ -724,6 +727,8 @@ contract StakeCertificates is AccessControl, Pausable {
      */
     function unpause() external onlyRole(PAUSER_ROLE) {
         _unpause();
+        CLAIM.unpause();
+        STAKE.unpause();
     }
 
     /**

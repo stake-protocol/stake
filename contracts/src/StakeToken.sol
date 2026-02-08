@@ -130,9 +130,7 @@ contract StakeToken is ERC20, AccessControl {
         // Allow minting and burning unconditionally
         if (from != address(0) && to != address(0)) {
             // Check lockup
-            if (lockUntil[from] > block.timestamp) {
-                if (!lockupWhitelist[to]) revert TokensLocked();
-            }
+            if (lockUntil[from] > block.timestamp) if (!lockupWhitelist[to]) revert TokensLocked();
         }
         super._update(from, to, amount);
     }

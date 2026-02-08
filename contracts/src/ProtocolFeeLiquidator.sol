@@ -89,17 +89,11 @@ contract ProtocolFeeLiquidator {
      * @param lockupEnd_ When the lockup period ends (tokens start unlocking).
      * @param vestingDuration_ How long the linear vesting lasts after lockup.
      *
-     * @dev Tokens must be transferred to this contract after deployment.
-     *      The totalTokens is read from the balance at the time of the first liquidate() call,
-     *      OR can be set via initialize() if tokens are sent in the same transaction.
+     * @dev Tokens must be transferred to this contract after deployment, then initialize()
+     *      must be called to snapshot the balance as totalTokens. The StakeVault handles both
+     *      steps atomically during transition. If initialize() is never called, liquidate() reverts.
      */
-    constructor(
-        address token_,
-        address router_,
-        address treasury_,
-        uint64 lockupEnd_,
-        uint64 vestingDuration_
-    ) {
+    constructor(address token_, address router_, address treasury_, uint64 lockupEnd_, uint64 vestingDuration_) {
         token = token_;
         router = router_;
         treasury = treasury_;
@@ -193,11 +187,8 @@ contract ProtocolFeeLiquidator {
         _lockupEnd = lockupEnd;
         _vestingEnd = vestingEnd;
 
-        if (totalTokens == 0) {
-            _percentComplete = 0;
-        } else {
-            _percentComplete = uint16((totalReleased * BPS_BASE) / totalTokens);
-        }
+        if (totalTokens == 0) _percentComplete = 0;
+        else _percentComplete = uint16((totalReleased * BPS_BASE) / totalTokens);
     }
 
     uint16 private constant BPS_BASE = 10_000;
