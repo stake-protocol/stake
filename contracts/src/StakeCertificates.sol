@@ -38,6 +38,7 @@ error AlreadyTransitioned();
 error NotTransitioned();
 error VaultAlreadySet();
 error InvalidVault();
+error InvalidAuthority();
 
 // ============ Enums ============
 
@@ -72,11 +73,12 @@ struct Pact {
 
 struct ClaimState {
     bool voided;
-    bool redeemed;
+    bool fullyRedeemed;
     uint64 issuedAt;
     uint64 redeemableAt;
     UnitType unitType;
     uint256 maxUnits;
+    uint256 redeemedUnits;
     bytes32 reasonHash;
 }
 
@@ -150,8 +152,11 @@ abstract contract SoulboundERC721 is ERC721, IERC5192, AccessControl, Pausable {
         return interfaceId == type(IERC5192).interfaceId || super.supportsInterface(interfaceId);
     }
 
+    event BaseURIUpdated(string newBaseURI);
+
     function setBaseURI(string calldata newBaseURI) external onlyRole(ISSUER_ROLE) {
         _baseTokenURI = newBaseURI;
+        emit BaseURIUpdated(newBaseURI);
     }
 
     function _baseURI() internal view override returns (string memory) {
@@ -272,6 +277,15 @@ contract StakePactRegistry is AccessControl {
      */
     function pactExists(bytes32 pactId) external view returns (bool) {
         return _pacts[pactId].pactId != bytes32(0);
+    }
+
+    /**
+     * @notice Try to get a pact by ID. Returns (true, pact) if found, (false, empty) if not.
+     */
+    function tryGetPact(bytes32 pactId) external view returns (bool exists, Pact memory pact) {
+        Pact storage p = _pacts[pactId];
+        if (p.pactId != bytes32(0)) return (true, p);
+        return (false, pact);
     }
 
     /**
@@ -424,11 +438,12 @@ contract SoulboundClaim is SoulboundERC721 {
         claimPact[id] = pactId;
         _claims[id] = ClaimState({
             voided: false,
-            redeemed: false,
+            fullyRedeemed: false,
             issuedAt: uint64(block.timestamp),
             redeemableAt: redeemableAt,
             unitType: unitType,
             maxUnits: maxUnits,
+            redeemedUnits: 0,
             reasonHash: bytes32(0)
         });
 
@@ -445,11 +460,10 @@ contract SoulboundClaim is SoulboundERC721 {
 
         ClaimState storage c = _claims[claimId];
         if (c.voided) revert AlreadyVoided();
-        if (c.redeemed) revert ClaimNotRedeemable();
+        if (c.fullyRedeemed) revert ClaimNotRedeemable();
 
-        bytes32 pactId = claimPact[claimId];
-        Pact memory p = REGISTRY.getPact(pactId);
-        if (p.revocationMode == RevocationMode.NONE) revert RevocationDisabled();
+        // Voiding is distinct from revocation — authority can always void an unredeemed claim
+        // regardless of pact revocationMode. Revocation (on stakes) is what revocationMode controls.
 
         c.voided = true;
         c.reasonHash = reasonHash;
@@ -457,18 +471,40 @@ contract SoulboundClaim is SoulboundERC721 {
     }
 
     /**
-     * @notice Mark a claim as redeemed (called by StakeCertificates)
+     * @notice Record a redemption against a claim (called by StakeCertificates).
+     *         Supports partial redemptions — only marks fully redeemed when all units consumed.
      */
-    function markRedeemed(uint256 claimId, bytes32 reasonHash) external onlyRole(ISSUER_ROLE) whenNotPaused {
+    function recordRedemption(
+        uint256 claimId,
+        uint256 units,
+        bytes32 reasonHash
+    )
+        external
+        onlyRole(ISSUER_ROLE)
+        whenNotPaused
+    {
         if (_ownerOf(claimId) == address(0)) revert ClaimNotFound();
 
         ClaimState storage c = _claims[claimId];
         if (c.voided) revert AlreadyVoided();
-        if (c.redeemed) revert ClaimNotRedeemable();
+        if (c.fullyRedeemed) revert ClaimNotRedeemable();
+        if (c.redeemedUnits + units > c.maxUnits) revert InvalidUnits();
 
-        c.redeemed = true;
+        c.redeemedUnits += units;
         c.reasonHash = reasonHash;
+
+        if (c.redeemedUnits == c.maxUnits) c.fullyRedeemed = true;
+
         emit ClaimRedeemed(claimId, reasonHash);
+    }
+
+    /**
+     * @notice Get remaining redeemable units for a claim
+     */
+    function remainingUnits(uint256 claimId) external view returns (uint256) {
+        if (_ownerOf(claimId) == address(0)) revert ClaimNotFound();
+        ClaimState storage c = _claims[claimId];
+        return c.maxUnits - c.redeemedUnits;
     }
 
     /**
@@ -675,7 +711,7 @@ contract StakeCertificates is AccessControl, Pausable {
     bytes32 public constant AUTHORITY_ROLE = keccak256("AUTHORITY_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
-    address public immutable AUTHORITY;
+    address public authority;
     bytes32 public immutable ISSUER_ID;
 
     StakePactRegistry public immutable REGISTRY;
@@ -694,21 +730,22 @@ contract StakeCertificates is AccessControl, Pausable {
 
     event Redeemed(bytes32 indexed redemptionId, uint256 indexed claimId, uint256 indexed stakeId);
     event TransitionInitiated(address indexed vault, uint64 timestamp);
+    event AuthorityTransferred(address indexed oldAuthority, address indexed newAuthority);
 
     modifier whenNotTransitioned() {
         if (transitioned) revert AlreadyTransitioned();
         _;
     }
 
-    constructor(address authority) {
-        AUTHORITY = authority;
-        ISSUER_ID = keccak256(abi.encode(block.chainid, authority));
+    constructor(address authority_) {
+        authority = authority_;
+        ISSUER_ID = keccak256(abi.encode(block.chainid, authority_));
 
-        _grantRole(DEFAULT_ADMIN_ROLE, authority);
-        _grantRole(AUTHORITY_ROLE, authority);
-        _grantRole(PAUSER_ROLE, authority);
+        _grantRole(DEFAULT_ADMIN_ROLE, authority_);
+        _grantRole(AUTHORITY_ROLE, authority_);
+        _grantRole(PAUSER_ROLE, authority_);
 
-        REGISTRY = new StakePactRegistry(authority, address(this));
+        REGISTRY = new StakePactRegistry(authority_, address(this));
         CLAIM = new SoulboundClaim(address(this), ISSUER_ID, REGISTRY);
         STAKE = new SoulboundStake(address(this), ISSUER_ID, REGISTRY);
     }
@@ -729,6 +766,43 @@ contract StakeCertificates is AccessControl, Pausable {
         _unpause();
         CLAIM.unpause();
         STAKE.unpause();
+    }
+
+    /**
+     * @notice Transfer authority to a new address. Transfers all roles to new authority.
+     *         Pre-transition only — post-transition, authority powers are frozen.
+     */
+    function transferAuthority(address newAuthority) external onlyRole(AUTHORITY_ROLE) whenNotTransitioned {
+        if (newAuthority == address(0)) revert InvalidAuthority();
+
+        address oldAuthority = authority;
+        authority = newAuthority;
+
+        // Transfer roles to new authority
+        _grantRole(DEFAULT_ADMIN_ROLE, newAuthority);
+        _grantRole(AUTHORITY_ROLE, newAuthority);
+        _grantRole(PAUSER_ROLE, newAuthority);
+
+        // Revoke from old authority
+        _revokeRole(DEFAULT_ADMIN_ROLE, oldAuthority);
+        _revokeRole(AUTHORITY_ROLE, oldAuthority);
+        _revokeRole(PAUSER_ROLE, oldAuthority);
+
+        emit AuthorityTransferred(oldAuthority, newAuthority);
+    }
+
+    /**
+     * @notice Set the base URI for claim certificate metadata
+     */
+    function setClaimBaseURI(string calldata newBaseURI) external onlyRole(AUTHORITY_ROLE) {
+        CLAIM.setBaseURI(newBaseURI);
+    }
+
+    /**
+     * @notice Set the base URI for stake certificate metadata
+     */
+    function setStakeBaseURI(string calldata newBaseURI) external onlyRole(AUTHORITY_ROLE) {
+        STAKE.setBaseURI(newBaseURI);
     }
 
     /**
@@ -767,7 +841,7 @@ contract StakeCertificates is AccessControl, Pausable {
     {
         return REGISTRY.createPact(
             ISSUER_ID,
-            AUTHORITY,
+            authority,
             contentHash,
             rightsRoot,
             uri,
@@ -829,6 +903,44 @@ contract StakeCertificates is AccessControl, Pausable {
     }
 
     /**
+     * @notice Batch issue claims for operational efficiency on L1.
+     */
+    function issueClaimBatch(
+        bytes32[] calldata issuanceIds,
+        address[] calldata recipients,
+        bytes32 pactId,
+        uint256[] calldata maxUnitsArr,
+        UnitType unitType,
+        uint64 redeemableAt
+    )
+        external
+        onlyRole(AUTHORITY_ROLE)
+        whenNotTransitioned
+        whenNotPaused
+        returns (uint256[] memory)
+    {
+        uint256 len = issuanceIds.length;
+        if (len != recipients.length || len != maxUnitsArr.length) revert InvalidUnits();
+
+        uint256[] memory claimIds = new uint256[](len);
+        for (uint256 i = 0; i < len; i++) {
+            bytes32 paramsHash = keccak256(abi.encode(recipients[i], pactId, maxUnitsArr[i], unitType, redeemableAt));
+
+            uint256 existing = claimIdByIssuanceId[issuanceIds[i]];
+            if (existing != 0) {
+                if (claimParamsHashByIssuanceId[issuanceIds[i]] != paramsHash) revert IdempotenceMismatch();
+                claimIds[i] = existing;
+            } else {
+                uint256 claimId = CLAIM.issueClaim(recipients[i], pactId, maxUnitsArr[i], unitType, redeemableAt);
+                claimIdByIssuanceId[issuanceIds[i]] = claimId;
+                claimParamsHashByIssuanceId[issuanceIds[i]] = paramsHash;
+                claimIds[i] = claimId;
+            }
+        }
+        return claimIds;
+    }
+
+    /**
      * @notice Void a claim by issuance ID
      */
     function voidClaim(
@@ -876,9 +988,9 @@ contract StakeCertificates is AccessControl, Pausable {
         if (!CLAIM.exists(claimId)) revert ClaimNotFound();
 
         ClaimState memory c = CLAIM.getClaim(claimId);
-        if (c.voided || c.redeemed) revert ClaimNotRedeemable();
+        if (c.voided || c.fullyRedeemed) revert ClaimNotRedeemable();
         if (c.redeemableAt != 0 && block.timestamp < c.redeemableAt) revert ClaimNotRedeemable();
-        if (units == 0 || units > c.maxUnits) revert InvalidUnits();
+        if (units == 0 || units > (c.maxUnits - c.redeemedUnits)) revert InvalidUnits();
         if (unitType != c.unitType) revert InvalidUnits();
 
         bytes32 pactId = CLAIM.claimPact(claimId);
@@ -889,7 +1001,7 @@ contract StakeCertificates is AccessControl, Pausable {
         uint256 stakeId =
             STAKE.mintStake(to, pactId, units, unitType, vestStart, vestCliff, vestEnd, p.defaultRevocableUnvested);
 
-        CLAIM.markRedeemed(claimId, reasonHash);
+        CLAIM.recordRedemption(claimId, units, reasonHash);
 
         stakeIdByRedemptionId[redemptionId] = stakeId;
         stakeParamsHashByRedemptionId[redemptionId] = paramsHash;
