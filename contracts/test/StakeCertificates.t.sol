@@ -740,6 +740,21 @@ contract StakeCertificatesTest is Test {
         certificates.transferAuthority(address(0));
     }
 
+    function test_TransferAuthority_RegistryNotDirectlyAccessible() public {
+        // Authority EOA should NOT have direct admin on the registry
+        bytes32 operatorRole = registry.OPERATOR_ROLE();
+        bytes32 adminRole = registry.DEFAULT_ADMIN_ROLE();
+
+        // Authority is not registry admin — StakeCertificates is
+        assertFalse(registry.hasRole(adminRole, authority));
+        assertTrue(registry.hasRole(adminRole, address(certificates)));
+
+        // Authority cannot grant operator role on registry directly
+        vm.prank(authority);
+        vm.expectRevert();
+        registry.grantRole(operatorRole, recipient);
+    }
+
     function test_TransferAuthority_RevertsPostTransition() public {
         vm.startPrank(authority);
         certificates.initiateTransition(vaultAddr);

@@ -745,7 +745,9 @@ contract StakeCertificates is AccessControl, Pausable {
         _grantRole(AUTHORITY_ROLE, authority_);
         _grantRole(PAUSER_ROLE, authority_);
 
-        REGISTRY = new StakePactRegistry(authority_, address(this));
+        // StakeCertificates is sole admin+operator on registry — no direct EOA admin surface.
+        // Authority rotation on this contract covers all registry access.
+        REGISTRY = new StakePactRegistry(address(this), address(this));
         CLAIM = new SoulboundClaim(address(this), ISSUER_ID, REGISTRY);
         STAKE = new SoulboundStake(address(this), ISSUER_ID, REGISTRY);
     }
