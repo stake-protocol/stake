@@ -874,6 +874,7 @@ contract StakeCertificates is AccessControl, Pausable {
         if (c.voided || c.redeemed) revert ClaimNotRedeemable();
         if (c.redeemableAt != 0 && block.timestamp < c.redeemableAt) revert ClaimNotRedeemable();
         if (units == 0 || units > c.maxUnits) revert InvalidUnits();
+        if (unitType != c.unitType) revert InvalidUnits();
 
         bytes32 pactId = CLAIM.claimPact(claimId);
         Pact memory p = REGISTRY.getPact(pactId);

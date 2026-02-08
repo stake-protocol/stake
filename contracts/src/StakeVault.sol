@@ -53,6 +53,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
     // ============ Protocol Fee ============
     address public protocolFeeAddress;
     ProtocolFeeLiquidator public protocolFeeLiquidator;
+    uint256 public protocolFeeBalance; // accumulated fee tokens not yet sent to liquidator
 
     // ============ Certificate Tracking ============
     struct DepositedCert {
@@ -243,10 +244,15 @@ contract StakeVault is AccessControl, ReentrancyGuard {
 
                 // Deploy liquidator on first batch if router provided
                 if (address(protocolFeeLiquidator) == address(0) && liquidationRouter != address(0)) {
-                    _deployLiquidator(protocolFee, liquidationRouter);
+                    protocolFeeBalance += protocolFee;
+                    _deployLiquidator(protocolFeeBalance, liquidationRouter);
+                    protocolFeeBalance = 0;
                 } else if (address(protocolFeeLiquidator) != address(0)) {
                     // Transfer to existing liquidator
                     token.transfer(address(protocolFeeLiquidator), protocolFee);
+                } else {
+                    // No liquidator yet — accumulate fee balance
+                    protocolFeeBalance += protocolFee;
                 }
             }
         }
@@ -259,10 +265,10 @@ contract StakeVault is AccessControl, ReentrancyGuard {
      */
     function deployLiquidator(address liquidationRouter) external onlyRole(OPERATOR_ROLE) {
         if (address(protocolFeeLiquidator) != address(0)) revert TransitionAlreadyProcessed();
-        uint256 balance = token.balanceOf(address(this));
-        // Only the protocol fee portion should go to the liquidator
-        // (holder tokens are tracked separately via totalTokensAllocated)
-        _deployLiquidator(balance, liquidationRouter);
+        if (protocolFeeBalance == 0) revert NoTokensToClaim();
+        uint256 feeTokens = protocolFeeBalance;
+        protocolFeeBalance = 0;
+        _deployLiquidator(feeTokens, liquidationRouter);
     }
 
     function _deployLiquidator(uint256 feeTokens, address liquidationRouter) internal {
