@@ -143,6 +143,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
     error InvalidProposal();
     error Unauthorized();
     error AlreadyDeposited();
+    error VaultNotBound();
 
     constructor(
         address certificates_,
@@ -180,14 +181,13 @@ contract StakeVault is AccessControl, ReentrancyGuard {
      *         batches are processed to deploy the fee liquidator with all fee tokens.
      * @param stakeIds Array of stake token IDs to process.
      */
-    function processTransitionBatch(
-        uint256[] calldata stakeIds
-    )
-        external
-        onlyRole(OPERATOR_ROLE)
-        nonReentrant
-    {
+    function processTransitionBatch(uint256[] calldata stakeIds) external onlyRole(OPERATOR_ROLE) nonReentrant {
         if (!certificates.transitioned()) revert TransitionNotInitiated();
+
+        // Verify this vault is correctly wired to the certificate and token contracts.
+        // Prevents deployment misconfigurations from bricking or losing assets.
+        if (address(stakeContract.vault()) != address(this)) revert VaultNotBound();
+        if (!token.hasRole(token.MINTER_ROLE(), address(this))) revert VaultNotBound();
 
         if (!transitionProcessed) {
             transitionTimestamp = uint64(block.timestamp);
@@ -316,6 +316,10 @@ contract StakeVault is AccessControl, ReentrancyGuard {
             uint256 elapsed = block.timestamp - cert.vestStart;
             uint256 duration = cert.vestEnd - cert.vestStart;
             totalVestedNow = duration == 0 ? cert.totalUnits : (cert.totalUnits * elapsed) / duration;
+            // Floor clamp: revoked UNVESTED_ONLY stakes have totalUnits == vestedUnitsAtTransition
+            // (already fully vested). Linear interpolation on the reduced units can produce a value
+            // below vestedUnitsAtTransition, causing underflow in the newlyVested subtraction.
+            if (totalVestedNow < cert.vestedUnitsAtTransition) totalVestedNow = cert.vestedUnitsAtTransition;
         }
 
         uint256 newlyVested = totalVestedNow - cert.vestedUnitsAtTransition - cert.tokensClaimed;
