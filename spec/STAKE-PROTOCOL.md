@@ -1033,9 +1033,32 @@ The coordinator contract separates three roles:
 - `PAUSER_ROLE`: Emergency pause/unpause (see §21.5)
 - `DEFAULT_ADMIN_ROLE`: Role administration
 
-Authority is transferable via `transferAuthority(newAuthority)`. This transfers all three roles atomically to the new address and revokes them from the old address. Pre-transition only — authority powers freeze permanently at transition.
+Authority is transferable via `transferAuthority(newAuthority)`. This transfers all three roles atomically to the new address and revokes them from the old address. Pre-transition only.
+
+At transition, `initiateTransition()` permanently revokes all three roles from the authority address and ensures child contracts are unpaused. After transition, no address holds any role on StakeCertificates. Vault operations (transfers, auctions, reclaim, override) cannot be blocked by any party. This is the "app can die" guarantee — the protocol survives the disappearance of the issuer, the application, or both.
 
 The child contracts (StakePactRegistry, SoulboundClaim, SoulboundStake) are administered exclusively by the StakeCertificates coordinator contract. No external EOA holds admin roles on child contracts. This ensures that authority rotation on the coordinator covers all protocol access without residual privilege on child contracts.
+
+### 21.1.1 Board Governance via Multisig
+
+Pre-transition, the authority address controls all protocol operations. For projects with a board of directors, the authority SHOULD be a multisig (e.g., Gnosis Safe) where board members are signers and the signing threshold represents the board vote requirement.
+
+| Board structure         | Multisig configuration                        |
+| ----------------------- | --------------------------------------------- |
+| Solo founder            | EOA (single address)                          |
+| Co-founders             | 2-of-2 multisig                               |
+| Founder + 2 investors   | 2-of-3 or 3-of-3 multisig                     |
+| 5-person board          | 3-of-5 multisig                               |
+| Board with observers    | Observers are NOT signers (info rights only)  |
+
+Board seats granted as part of an investment or agreement are recorded in the Pact JSON rights section as a `PWR_BOARD_SEAT` clause. The Pact is the legal record; the multisig is the enforcement mechanism.
+
+The protocol does NOT verify or enforce that Pact-granted board seats correspond to multisig signers. This is intentional:
+
+1. **No external coupling**: The protocol does not depend on any specific multisig implementation.
+2. **Board dynamics are complex**: Voting members, observers, independent directors, and advisory roles cannot be reliably inferred from multisig signer lists.
+3. **Legal enforcement**: If a Pact grants a board seat and the authority does not reflect it, the certificate holder has legal recourse — the Pact's `content_hash` is onchain-verifiable.
+4. **Application-layer verification**: Applications SHOULD display Pact-granted board rights alongside current multisig composition and flag discrepancies.
 
 ### 21.2 Idempotence
 
