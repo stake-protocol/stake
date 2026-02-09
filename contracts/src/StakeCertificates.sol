@@ -751,18 +751,18 @@ contract StakeCertificates is AccessControl, Pausable {
     }
 
     /**
-     * @notice Pause all state-changing operations
+     * @notice Pause all state-changing operations. Pre-transition only.
      */
-    function pause() external onlyRole(PAUSER_ROLE) {
+    function pause() external onlyRole(PAUSER_ROLE) whenNotTransitioned {
         _pause();
         CLAIM.pause();
         STAKE.pause();
     }
 
     /**
-     * @notice Unpause operations
+     * @notice Unpause operations. Pre-transition only.
      */
-    function unpause() external onlyRole(PAUSER_ROLE) {
+    function unpause() external onlyRole(PAUSER_ROLE) whenNotTransitioned {
         _unpause();
         CLAIM.unpause();
         STAKE.unpause();
@@ -792,21 +792,23 @@ contract StakeCertificates is AccessControl, Pausable {
     }
 
     /**
-     * @notice Set the base URI for claim certificate metadata
+     * @notice Set the base URI for claim certificate metadata. Pre-transition only.
      */
-    function setClaimBaseURI(string calldata newBaseURI) external onlyRole(AUTHORITY_ROLE) {
+    function setClaimBaseURI(string calldata newBaseURI) external onlyRole(AUTHORITY_ROLE) whenNotTransitioned {
         CLAIM.setBaseURI(newBaseURI);
     }
 
     /**
-     * @notice Set the base URI for stake certificate metadata
+     * @notice Set the base URI for stake certificate metadata. Pre-transition only.
      */
-    function setStakeBaseURI(string calldata newBaseURI) external onlyRole(AUTHORITY_ROLE) {
+    function setStakeBaseURI(string calldata newBaseURI) external onlyRole(AUTHORITY_ROLE) whenNotTransitioned {
         STAKE.setBaseURI(newBaseURI);
     }
 
     /**
-     * @notice Initiate transition. Sets vault on child contracts and freezes issuer powers.
+     * @notice Initiate transition. Sets vault on child contracts, permanently revokes all
+     *         issuer powers, and ensures child contracts are unpaused for vault operations.
+     *         This is irreversible — after this call, the authority has zero control.
      * @param vault_ The vault contract address that will custody certificates post-transition.
      */
     function initiateTransition(address vault_) external onlyRole(AUTHORITY_ROLE) whenNotTransitioned whenNotPaused {
@@ -817,6 +819,16 @@ contract StakeCertificates is AccessControl, Pausable {
         // Set vault on child contracts so they allow vault-initiated transfers
         CLAIM.setVault(vault_);
         STAKE.setVault(vault_);
+
+        // Ensure child contracts are unpaused — vault operations must be unstoppable
+        if (CLAIM.paused()) CLAIM.unpause();
+        if (STAKE.paused()) STAKE.unpause();
+
+        // Permanently revoke ALL authority roles — issuer powers freeze forever.
+        // After this, no EOA holds any role on this contract.
+        _revokeRole(PAUSER_ROLE, authority);
+        _revokeRole(AUTHORITY_ROLE, authority);
+        _revokeRole(DEFAULT_ADMIN_ROLE, authority);
 
         emit TransitionInitiated(vault_, uint64(block.timestamp));
     }

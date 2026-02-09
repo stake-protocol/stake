@@ -127,10 +127,12 @@ contract StakeVault is AccessControl, ReentrancyGuard {
     error TransitionAlreadyProcessed();
     error NoTokensToClaim();
     error LockupActive();
+    error AuctionAlreadyActive();
     error AuctionNotActive();
     error BidTooLow();
     error AuctionNotEnded();
-    error SeatNotExpired();
+    error SeatStillActive();
+    error CertNotInVault();
     error SeatNotActive();
     error OverrideCooldownActive();
     error VotingPeriodClosed();
@@ -334,12 +336,12 @@ contract StakeVault is AccessControl, ReentrancyGuard {
      */
     function startSeatAuction(uint256 certId) external {
         // Cert must be in the vault and not currently governed
-        if (stakeContract.ownerOf(certId) != address(this)) revert SeatNotActive();
+        if (stakeContract.ownerOf(certId) != address(this)) revert CertNotInVault();
         GovernanceSeat storage seat = seats[certId];
-        if (seat.active) revert SeatNotExpired();
+        if (seat.active) revert SeatStillActive();
 
         Auction storage a = auctions[certId];
-        if (a.startTime != 0 && !a.settled) revert AuctionNotActive();
+        if (a.startTime != 0 && !a.settled) revert AuctionAlreadyActive();
 
         uint64 start = uint64(block.timestamp);
         uint64 end = start + uint64(auctionDuration);
@@ -417,7 +419,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
     function reclaimSeat(uint256 certId) external nonReentrant {
         GovernanceSeat storage seat = seats[certId];
         if (!seat.active) revert SeatNotActive();
-        if (block.timestamp < seat.termEnd) revert SeatNotExpired();
+        if (block.timestamp < seat.termEnd) revert SeatStillActive();
 
         address formerGovernor = seat.governor;
         uint256 bidReturn = seat.bidAmount;
