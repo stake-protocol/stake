@@ -210,6 +210,12 @@ Power and priority attributes — governance weight, liquidation preference, sen
 
 This mirrors early-stage startup governance. Founders and investors control the board. The cap table is managed by the company. Decisions are fast and centralized because the organization is small and the trust relationships are direct.
 
+**Board governance via multisig.** For projects with a board of directors or advisory board, the issuer authority address should be a multisig wallet (e.g., Gnosis Safe). The multisig signers are the board members; the signing threshold is the board's decision-making quorum. This maps traditional board governance directly onto Ethereum's native authorization model — every issuer action (creating Pacts, issuing Claims, revoking Stakes, initiating transition) requires board approval through the multisig threshold.
+
+Board seats and officer roles are recorded in Pacts as rights clauses (`PWR_BOARD_SEAT`, `PWR_OFFICER`). This creates a verifiable onchain record of governance agreements without coupling the protocol to external multisig configuration. The protocol intentionally does not enforce that Pact-recorded board seats match multisig signers — board composition changes through corporate actions (resignations, appointments, elections) that happen faster than onchain governance. Enforcement is handled by the Pact's governing law and the board's own bylaws. Applications can verify alignment between Pact records and multisig configuration at the interface layer.
+
+At transition, all authority roles are permanently revoked. The multisig — like any pre-transition issuer — loses all protocol powers. Post-transition governance is handled exclusively by the certificate-based governance seat system described below.
+
 ### VI.B. Post-Transition: The Governance Simplification Event
 
 Transition is a governance simplification event. The complex private-company structures — power classes, priority waterfalls, seniority tiers — collapse into a simple public system:
