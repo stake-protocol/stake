@@ -53,6 +53,7 @@ contract StakeToken is ERC20, AccessControl {
         ERC20(name_, symbol_)
     {
         if (authorizedSupply_ == 0) revert InvalidSupply();
+        if (protocolFeeAddress_ == address(0)) revert InvalidSupply();
 
         authorizedSupply = authorizedSupply_;
         protocolFeeAddress = protocolFeeAddress_;
