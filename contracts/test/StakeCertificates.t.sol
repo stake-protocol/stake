@@ -760,7 +760,8 @@ contract StakeCertificatesTest is Test {
         vm.startPrank(authority);
         certificates.initiateTransition(vaultAddr);
 
-        vm.expectRevert(AlreadyTransitioned.selector);
+        // Authority roles revoked at transition — can't transfer
+        vm.expectRevert();
         certificates.transferAuthority(address(0x99));
         vm.stopPrank();
     }
@@ -840,11 +841,17 @@ contract StakeCertificatesTest is Test {
         vm.startPrank(authority);
         certificates.initiateTransition(vaultAddr);
 
-        vm.expectRevert(AlreadyTransitioned.selector);
+        // Authority roles are revoked at transition — AccessControl fires before whenNotTransitioned
+        vm.expectRevert();
         certificates.createPact(keccak256("post"), rightsRoot, uri, "post-1.0", true, RevocationMode.ANY, false);
 
-        vm.expectRevert(AlreadyTransitioned.selector);
+        vm.expectRevert();
         certificates.issueClaim(keccak256("post"), recipient, pactId, 1000, UnitType.SHARES, 0);
+
+        // Verify authority has no roles
+        assertFalse(certificates.hasRole(certificates.AUTHORITY_ROLE(), authority));
+        assertFalse(certificates.hasRole(certificates.PAUSER_ROLE(), authority));
+        assertFalse(certificates.hasRole(certificates.DEFAULT_ADMIN_ROLE(), authority));
         vm.stopPrank();
     }
 
@@ -858,7 +865,8 @@ contract StakeCertificatesTest is Test {
         vm.startPrank(authority);
         certificates.initiateTransition(vaultAddr);
 
-        vm.expectRevert(AlreadyTransitioned.selector);
+        // Authority roles revoked — can't call again even if they wanted to
+        vm.expectRevert();
         certificates.initiateTransition(vaultAddr);
         vm.stopPrank();
     }
@@ -894,19 +902,28 @@ contract StakeCertificatesTest is Test {
         stake.transferFrom(recipient, recipient2, stakeId);
     }
 
-    function test_VaultTransferBlockedWhenPaused() public {
+    function test_PauseRevertsPostTransition() public {
+        vm.startPrank(authority);
+        certificates.initiateTransition(vaultAddr);
+
+        // Authority can't pause post-transition — roles revoked
+        vm.expectRevert();
+        certificates.pause();
+        vm.stopPrank();
+    }
+
+    function test_VaultTransferWorksPostTransition() public {
         uint64 now_ = uint64(block.timestamp);
         vm.startPrank(authority);
         (, uint256 stakeId) =
-            _issueAndRedeem(keccak256("pause-xfer"), keccak256("pause-xfer-r"), recipient, 1000, now_, now_, now_);
+            _issueAndRedeem(keccak256("vault-post"), keccak256("vault-post-r"), recipient, 1000, now_, now_, now_);
         certificates.initiateTransition(vaultAddr);
-        certificates.pause();
         vm.stopPrank();
 
-        // Vault transfer should revert while paused
+        // Vault transfers are unstoppable post-transition
         vm.prank(vaultAddr);
-        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
         stake.transferFrom(recipient, vaultAddr, stakeId);
+        assertEq(stake.ownerOf(stakeId), vaultAddr);
     }
 
     // ============ ERC-5192 Interface Tests ============
