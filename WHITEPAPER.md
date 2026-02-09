@@ -1,6 +1,6 @@
 # Stake Protocol
 
-## Onchain Equity for the Token Economy
+## Soulbound Equity Certificates
 
 **A Whitepaper — Draft v0.1**
 
@@ -8,7 +8,7 @@
 
 ## I. Abstract
 
-Stake Protocol is an onchain system for issuing, managing, and optionally transitioning equity-like ownership stakes on Ethereum. It introduces the Stake Certificate: a non-transferable, wallet-held record that represents a real ownership position — not a speculative token, not a promise of future value, but an auditable, issuer-governed equity instrument.
+Stake Protocol is an onchain system for issuing, managing, and optionally transitioning equity-like ownership stakes on Ethereum. It introduces the Stake Certificate: a non-transferable, soulbound, wallet-held record that represents a real ownership position — not a speculative token, not a promise of future value, but an auditable, issuer-governed equity instrument.
 
 The protocol models a deterministic lifecycle: **Pact, Claim, Stake, Token.** A Pact is the foundational agreement. A Claim is a contingent right. A Stake is confirmed ownership. A Token is optional — the liquidity layer that a project may or may not choose to add, on its own timeline, when it is ready.
 
