@@ -1,6 +1,6 @@
 # Stake Protocol — Soulbound Equity Certificates
 
-Status: Draft v0.3
+Status: Draft v0.4
 
 ## 1. Abstract
 
@@ -78,7 +78,7 @@ A Stake MAY include vesting metadata. Revocation and voiding are permitted only 
 
 An Issuer MAY initiate a Transition — the irreversible event that converts the certificate-based system into a token-based public structure. Transition is a one-way operation. Once initiated, the following changes take effect atomically:
 
-1. All outstanding certificates are unlocked (soulbound status removed) and transferred to the Vault in a single batch operation.
+1. All outstanding stake certificates are transferred to the Vault via vault-initiated transfers (soulbound bypass) in batched operations.
 2. ERC-20 tokens are minted proportional to each certificate holder's vested units.
 3. All issuer powers freeze permanently. The functions `createPact`, `amendPact`, `issueClaim`, `voidClaim`, and `revokeStake` MUST revert after transition.
 4. The governance system activates. Certificates in the Vault become governance seats available for auction.
@@ -101,22 +101,37 @@ canonical_pact_json_bytes MUST be computed using RFC 8785 (JSON Canonicalization
 
 ### 5.2 Pact Fields
 
+Pact fields are split between onchain storage (the `Pact` struct) and offchain content (the canonical Pact JSON referenced by `content_hash` and `uri`). The onchain struct stores only what is needed for protocol enforcement. All legal, amendment, dispute, and signing terms are in the offchain Pact JSON document, verifiable via `content_hash`.
+
+#### 5.2.1 Onchain Fields (Pact Struct)
+
+| Field                     | Type           | Meaning                                                         |
+| ------------------------- | -------------- | --------------------------------------------------------------- |
+| pact_id                   | bytes32        | Deterministic ID (see §5.1)                                     |
+| issuer_id                 | bytes32        | Issuer namespace                                                |
+| authority                 | address        | Authority address at Pact creation time                         |
+| content_hash              | bytes32        | Hash of canonical Pact JSON                                     |
+| supersedes_pact_id        | bytes32        | Previous Pact version ID (bytes32(0) if original)               |
+| rights_root               | bytes32        | Root hash of standardized rights schema payload                 |
+| uri                       | string         | IPFS/Arweave/HTTPS pointer to the Pact content                  |
+| pact_version              | string         | Semantic version identifier                                     |
+| mutable_pact              | bool           | Whether this Pact allows amendments                             |
+| revocation_mode           | uint8 (enum)   | 0 = NONE, 1 = UNVESTED_ONLY, 2 = ANY                           |
+| default_revocable_unvested| bool           | Whether stakes under this Pact are revocable by default         |
+
+#### 5.2.2 Offchain Fields (Pact JSON)
+
+The following fields are stored in the canonical Pact JSON document and verified via `content_hash`. They are NOT stored onchain.
+
 | Field               | Type    | Meaning                                                                                   |
 | ------------------- | ------- | ----------------------------------------------------------------------------------------- |
-| pact_version        | string  | Semantic version identifier                                                               |
-| content_hash        | bytes32 | Hash of canonical pact JSON                                                               |
-| uri                 | string  | IPFS/Arweave/HTTPS pointer to the Pact content                                            |
-| issuer_id           | bytes32 | Issuer namespace                                                                          |
-| authority           | address | Authority address for this Pact version                                                   |
-| mutability          | uint8   | 0 = immutable, 1 = mutable per rules                                                      |
-| amendment_mode      | uint8   | 0 = none, 1 = issuer_only, 2 = multisig_threshold, 3 = external_rules_hash                |
-| amendment_scope     | uint8   | 0 = future_only, 1 = retroactive_allowed_if_flagged                                       |
-| revocation_mode     | uint8   | 0 = none, 1 = unvested_only, 2 = per_stake_flags, 3 = external_rules_hash                 |
+| amendment_mode      | string  | "none", "issuer_only", "multisig_threshold", or "external_rules"                          |
+| amendment_scope     | string  | "future_only" or "retroactive_allowed_if_flagged"                                         |
 | dispute_law         | string  | Governing law                                                                             |
 | dispute_venue       | string  | Venue                                                                                     |
-| signing_mode        | uint8   | 0 = issuer_only, 1 = countersign_required_offchain, 2 = countersign_required_onchain      |
-| rights_root         | bytes32 | Root hash of standardized rights schema payload                                           |
+| signing_mode        | string  | "issuer_only", "countersign_required_offchain", or "countersign_required_onchain"          |
 | custom_terms_hash   | bytes32 | Hash of any custom text bundle referenced by the Pact                                     |
+| custom_terms_uri    | string  | URI to custom terms document                                                              |
 
 ### 5.3 Rights Schema Inside a Pact
 
@@ -159,7 +174,7 @@ Claims and Stakes are wallet-held ERC-721 tokens that are non-transferable durin
 
 Each certificate MUST reference a Pact version by pact_id. The Pact carries rights_root; verifiers and indexers MUST resolve rights_root via the referenced Pact.
 
-Certificates SHOULD expose tokenURI metadata for broad wallet/indexer compatibility. The tokenURI JSON SHOULD include issuer_id, pact_id, certificate type, and relevant hashes (conversionHash / vestingHash / revocationHash) so a third party can verify the certificate without bespoke ABI calls.
+Certificates SHOULD expose tokenURI metadata for broad wallet/indexer compatibility. The tokenURI JSON SHOULD include issuer_id, pact_id, certificate type, unit_type, and units so a third party can identify the certificate without bespoke ABI calls. Detailed rights and terms are resolved via the referenced Pact's `content_hash` and `rights_root`.
 
 ### 6.1 Unit Type Enumeration
 
@@ -174,49 +189,61 @@ The `unit_type` field uses the following values:
 
 Conforming implementations MUST store the `unit_type` on each certificate (both Claims and Stakes), not only in the Pact. This ensures that the unit domain is unambiguously readable from the certificate itself without requiring a Pact lookup.
 
-### 6.2 Status Flags Bitfield
+### 6.2 Certificate Status
 
-The `status_flags` field is a uint32 bitfield:
+Certificate status is tracked via individual boolean fields on each certificate struct, not a bitfield. This keeps the storage layout simple and avoids bitwise operations in the EVM.
 
-| Bit | Name         | Meaning                                    |
-| --- | ------------ | ------------------------------------------ |
-| 0   | VOIDED       | Certificate has been voided                |
-| 1   | REVOKED      | Stake has been revoked                     |
-| 2   | REDEEMED     | Claim has been converted to Stake          |
-| 3   | DISPUTED     | Certificate is under dispute               |
-| 4   | TRANSITIONED | Certificate has been deposited into Vault  |
-| 5-31| Reserved     | Reserved for future use                    |
+**Claim status fields:**
+
+| Field           | Type | Meaning                                    |
+| --------------- | ---- | ------------------------------------------ |
+| voided          | bool | Claim has been voided by issuer            |
+| fullyRedeemed   | bool | All units have been redeemed to Stakes     |
+
+A Claim with `redeemedUnits > 0` but `fullyRedeemed == false` is partially redeemed — it can still be redeemed for remaining units.
+
+**Stake status fields:**
+
+| Field   | Type | Meaning                     |
+| ------- | ---- | --------------------------- |
+| revoked | bool | Stake has been revoked      |
 
 ### 6.3 Claim Fields
 
-| Field         | Type    | Meaning                                 |
-| ------------- | ------- | --------------------------------------- |
-| schema        | string  | claim.v1                                |
-| issuer_id     | bytes32 | Issuer namespace                        |
-| pact_id       | bytes32 | Pact version reference                  |
-| recipient     | address | Current owner address                   |
-| unit_type     | uint8   | Units domain (see 6.1)                  |
-| units_max     | uint256 | Upper bound units claimable             |
-| conversion    | bytes32 | Hash describing conversion rule payload |
-| status_flags  | uint32  | Bitfield (see 6.2)                      |
-| issued_at     | uint64  | Timestamp                               |
+The onchain `ClaimState` struct stores the following fields. The `pact_id` is stored in a separate mapping (`claimPact`), and the owner is tracked by the ERC-721 `ownerOf`.
+
+| Field           | Type    | Meaning                                                |
+| --------------- | ------- | ------------------------------------------------------ |
+| voided          | bool    | Whether the claim has been voided                      |
+| fullyRedeemed   | bool    | Whether all units have been redeemed                   |
+| issuedAt        | uint64  | Timestamp of issuance                                  |
+| redeemableAt    | uint64  | Timestamp after which claim is redeemable (0 = immediate) |
+| unitType        | uint8   | Units domain (see §6.1)                                |
+| maxUnits        | uint256 | Upper bound units claimable                            |
+| redeemedUnits   | uint256 | Units already redeemed to Stakes                       |
+| reasonHash      | bytes32 | Hash of the most recent void/redemption reason         |
+
+Conversion conditions (IMMEDIATE, TIMED, MILESTONE, FUNDING, ELIGIBILITY) are expressed via `redeemableAt` for time-based conditions and offchain verification for other modes. The conversion payload is stored in the offchain Pact JSON, verifiable via `content_hash`.
 
 ### 6.4 Stake Fields
 
-| Field              | Type    | Meaning                                     |
-| ------------------ | ------- | ------------------------------------------- |
-| schema             | string  | stake.v1                                    |
-| issuer_id          | bytes32 | Issuer namespace                            |
-| pact_id            | bytes32 | Pact version reference                      |
-| recipient          | address | Current owner address                       |
-| unit_type          | uint8   | Units domain (see 6.1)                      |
-| units              | uint256 | Issued units (reduced to vested on revoke)  |
-| revoked_units      | uint256 | Units removed by revocation (0 if none)     |
-| vesting            | bytes32 | Hash of vesting payload                     |
-| revocation         | bytes32 | Hash of revocation payload                  |
-| status_flags       | uint32  | Bitfield (see 6.2)                          |
-| issued_at          | uint64  | Timestamp                                   |
-| revoked_at         | uint64  | Timestamp of revocation (0 if none)         |
+The onchain `StakeState` struct stores the following fields. The `pact_id` is stored in a separate mapping (`stakePact`), and the owner is tracked by the ERC-721 `ownerOf`.
+
+| Field              | Type    | Meaning                                                   |
+| ------------------ | ------- | --------------------------------------------------------- |
+| revoked            | bool    | Whether the stake has been revoked                        |
+| issuedAt           | uint64  | Timestamp of issuance                                     |
+| vestStart          | uint64  | Vesting start timestamp                                   |
+| vestCliff          | uint64  | Vesting cliff timestamp (no vesting before this)          |
+| vestEnd            | uint64  | Vesting end timestamp (fully vested at or after this)     |
+| revokedAt          | uint64  | Timestamp of revocation (0 if none)                       |
+| revocableUnvested  | bool    | Whether unvested portion is revocable                     |
+| unitType           | uint8   | Units domain (see §6.1)                                   |
+| units              | uint256 | Issued units (reduced to vested amount on revocation)     |
+| revokedUnits       | uint256 | Units removed by revocation (0 if none)                   |
+| reasonHash         | bytes32 | Hash of the revocation reason                             |
+
+Vesting parameters are stored directly on the stake rather than as a hash of an offchain payload. This enables the contract to calculate `vestedUnits()` and `unvestedUnits()` onchain, which is required for correct revocation behavior and transition token minting.
 
 ### 6.5 Non-Transferability and Unlock Conditions
 
@@ -273,17 +300,27 @@ Post-transition, Pact creation and amendment MUST revert. No new Pacts may be cr
 
 ## 9. Revocation and Voiding
 
-Revocation is permitted only within Pact-defined modes. The standard includes the ability to mark certificates voided or revoked, and to record a reason hash.
+Revocation and voiding are two distinct operations. **Voiding** cancels a Claim. **Revocation** cancels unvested or all portions of a Stake. The two are decoupled — voiding is always available to the issuer regardless of the Pact's revocation_mode setting.
 
 ### 9.1 Claim Voiding
 
-Claims MAY be voided by the issuer if the Pact permits it. Pre-transition only — voiding MUST revert after transition.
+Claims MAY be voided by the authority at any time, regardless of the Pact's `revocation_mode`. Pre-transition only — voiding MUST revert after transition.
+
+Voiding is decoupled from revocation mode because voiding cancels a pre-conversion instrument (a Claim), while revocation mode governs post-conversion instruments (Stakes). An issuer MUST be able to void a Claim even under a Pact with `revocation_mode = NONE`.
 
 ### 9.2 Stake Revocation
 
-Stakes MAY be revoked only as permitted by the Pact, typically unvested-only or per-stake flags. Pre-transition only — revocation MUST revert after transition.
+Stakes MAY be revoked only as permitted by the Pact's `revocation_mode`. Pre-transition only — revocation MUST revert after transition.
 
-When `revocation_mode` is `UNVESTED_ONLY`, revocation MUST only affect the unvested portion. The implementation MUST:
+The three revocation modes are:
+
+| Value | Mode           | Behavior                                           |
+| ----- | -------------- | -------------------------------------------------- |
+| 0     | NONE           | Revocation disabled. `revokeStake()` MUST revert.  |
+| 1     | UNVESTED_ONLY  | Only unvested portion can be revoked.              |
+| 2     | ANY            | Full stake (vested and unvested) can be revoked.   |
+
+When `revocation_mode` is `UNVESTED_ONLY`, revocation MUST only affect the unvested portion. Additionally, a stake with `revocableUnvested = false` MUST NOT be revocable even under UNVESTED_ONLY mode. The implementation MUST:
 
 1. Calculate the vested amount at the time of revocation:
 
@@ -330,66 +367,101 @@ Self-claim mode exists to make 10k–100k recipient distributions feasible witho
 
 ### 11.1 IPactRegistry
 
-A conforming implementation MUST support creation and lookup of Pact versions by pact_id.
+A conforming implementation MUST support creation, amendment, and lookup of Pact versions by pact_id.
 
 ```solidity
 interface IPactRegistry {
-    function createPact(...) external returns (bytes32 pactId);
-    function amendPact(...) external returns (bytes32 newPactId);
+    function createPact(bytes32 issuerId, address authority, bytes32 contentHash, bytes32 rightsRoot, string calldata uri, string calldata pactVersion, bool mutablePact, RevocationMode revocationMode, bool defaultRevocableUnvested) external returns (bytes32 pactId);
+    function amendPact(bytes32 oldPactId, bytes32 newContentHash, bytes32 newRightsRoot, string calldata newUri, string calldata newPactVersion) external returns (bytes32 newPactId);
     function getPact(bytes32 pactId) external view returns (Pact memory);
+    function tryGetPact(bytes32 pactId) external view returns (bool exists, Pact memory pact);
     function pactExists(bytes32 pactId) external view returns (bool);
     function computePactId(bytes32 issuerId, bytes32 contentHash, string calldata pactVersion) external pure returns (bytes32);
 }
 ```
 
+`tryGetPact` returns `(false, empty)` instead of reverting when the Pact does not exist. This is useful for composability — callers can check existence without try/catch.
+
 ### 11.2 IClaimCertificate
 
-A conforming implementation MUST support issuer minting of non-transferable ERC-721 Claims.
+A conforming implementation MUST support issuer minting of non-transferable ERC-721 Claims with partial redemption tracking.
 
 ```solidity
 interface IClaimCertificate {
-    function issueClaim(address to, bytes32 pactId, uint256 maxUnits, uint8 unitType, uint64 redeemableAt) external returns (uint256 claimId);
+    function issueClaim(address to, bytes32 pactId, uint256 maxUnits, UnitType unitType, uint64 redeemableAt) external returns (uint256 claimId);
     function voidClaim(uint256 claimId, bytes32 reasonHash) external;
-    function markRedeemed(uint256 claimId, bytes32 reasonHash) external;
+    function recordRedemption(uint256 claimId, uint256 units, bytes32 reasonHash) external;
     function getClaim(uint256 claimId) external view returns (ClaimState memory);
+    function remainingUnits(uint256 claimId) external view returns (uint256);
+    function exists(uint256 claimId) external view returns (bool);
 }
 ```
 
+`recordRedemption` supports partial redemption — a Claim with 10,000 maxUnits can be redeemed in multiple tranches (e.g., 5,000 + 3,000 + 2,000). The `fullyRedeemed` flag is set automatically when `redeemedUnits == maxUnits`. `remainingUnits` returns `maxUnits - redeemedUnits`.
+
 ### 11.3 IStakeCertificate
 
-A conforming implementation MUST support conversion of a Claim into a Stake and MUST burn, void, or mark redeemed (terminal) the Claim in the same transaction.
+A conforming implementation MUST support conversion of a Claim into a Stake. When a partial redemption consumes all remaining units, the Claim is marked `fullyRedeemed`.
 
 ```solidity
 interface IStakeCertificate {
-    function mintStake(address to, bytes32 pactId, uint256 units, uint8 unitType, uint64 vestStart, uint64 vestCliff, uint64 vestEnd, bool revocableUnvested) external returns (uint256 stakeId);
+    function mintStake(address to, bytes32 pactId, uint256 units, UnitType unitType, uint64 vestStart, uint64 vestCliff, uint64 vestEnd, bool revocableUnvested) external returns (uint256 stakeId);
     function revokeStake(uint256 stakeId, bytes32 reasonHash) external;
     function getStake(uint256 stakeId) external view returns (StakeState memory);
     function vestedUnits(uint256 stakeId) external view returns (uint256);
     function unvestedUnits(uint256 stakeId) external view returns (uint256);
+    function exists(uint256 stakeId) external view returns (bool);
 }
 ```
 
-### 11.4 IStakeVault
+### 11.4 IStakeCertificates (Coordinator)
+
+The coordinator contract is the main entry point. It orchestrates the registry, claims, and stakes and provides idempotence guarantees.
+
+```solidity
+interface IStakeCertificates {
+    function createPact(bytes32 contentHash, bytes32 rightsRoot, string calldata uri, string calldata pactVersion, bool mutablePact, RevocationMode revocationMode, bool defaultRevocableUnvested) external returns (bytes32);
+    function amendPact(bytes32 oldPactId, bytes32 newContentHash, bytes32 newRightsRoot, string calldata newUri, string calldata newPactVersion) external returns (bytes32);
+    function issueClaim(bytes32 issuanceId, address to, bytes32 pactId, uint256 maxUnits, UnitType unitType, uint64 redeemableAt) external returns (uint256);
+    function issueClaimBatch(bytes32[] calldata issuanceIds, address[] calldata recipients, bytes32 pactId, uint256[] calldata maxUnitsArr, UnitType unitType, uint64 redeemableAt) external returns (uint256[] memory);
+    function voidClaim(bytes32 issuanceId, bytes32 reasonHash) external;
+    function redeemToStake(bytes32 redemptionId, uint256 claimId, uint256 units, UnitType unitType, uint64 vestStart, uint64 vestCliff, uint64 vestEnd, bytes32 reasonHash) external returns (uint256);
+    function revokeStake(uint256 stakeId, bytes32 reasonHash) external;
+    function initiateTransition(address vault) external;
+    function transferAuthority(address newAuthority) external;
+    function setClaimBaseURI(string calldata newBaseURI) external;
+    function setStakeBaseURI(string calldata newBaseURI) external;
+}
+```
+
+`issueClaimBatch` provides gas-efficient batch issuance on L1 — issuing N claims in one transaction instead of N separate calls. All arrays MUST be the same length.
+
+`transferAuthority` transfers all roles (AUTHORITY, PAUSER, DEFAULT_ADMIN) from the current authority to the new address. Pre-transition only.
+
+### 11.5 IStakeVault
 
 A conforming implementation of the Vault MUST support the following operations:
 
 ```solidity
 interface IStakeVault {
-    function initializeFromTransition(uint256[] calldata certificateIds) external;
-    function claimTokens(uint256 certificateId) external;
-    function bidForSeat(uint256 certificateId, uint256 tokenAmount) external;
-    function reclaimSeat(uint256 certificateId) external;
-    function initiateOverride() external;
-    function voteOverride(bool support) external;
-    function executeOverride() external;
+    function processTransitionBatch(uint256[] calldata stakeIds, address liquidationRouter) external;
+    function claimTokens() external;
+    function releaseVestedTokens(uint256 stakeId) external;
+    function startSeatAuction(uint256 certId) external;
+    function bidForSeat(uint256 certId, uint256 amount) external;
+    function settleAuction(uint256 certId) external;
+    function reclaimSeat(uint256 certId) external;
+    function proposeOverride() external returns (uint256 proposalId);
+    function voteOverride(uint256 proposalId, bool support) external;
+    function executeOverride(uint256 proposalId) external;
 
-    function getGovernor(uint256 certificateId) external view returns (address governor, uint64 termStart, uint64 termEnd, uint256 bidAmount);
-    function isGovernanceSeat(uint256 certificateId) external view returns (bool);
-    function tokenAddress() external view returns (address);
+    function getGovernor(uint256 certId) external view returns (address governor, uint64 termStart, uint64 termEnd, uint256 bidAmount);
+    function isGovernanceSeat(uint256 certId) external view returns (bool);
+    function depositedStakeCount() external view returns (uint256);
 }
 ```
 
-### 11.5 IStakeToken
+### 11.6 IStakeToken
 
 A conforming implementation of the post-transition token MUST implement ERC-20 with the following extensions:
 
@@ -397,13 +469,22 @@ A conforming implementation of the post-transition token MUST implement ERC-20 w
 interface IStakeToken {
     function mint(address to, uint256 amount) external;
     function authorizedSupply() external view returns (uint256);
-    function setAuthorizedSupply(uint256 newCap) external;
+    function setAuthorizedSupply(uint256 newSupply) external;
+    function setLockup(address account, uint64 until) external;
+    function setLockupWhitelist(address target, bool whitelisted) external;
     function isLocked(address account) external view returns (bool);
     function lockUntil(address account) external view returns (uint64);
+    function governanceBalance(address account) external view returns (uint256);
 }
 ```
 
-### 11.6 ERC-165 Interface IDs
+`governanceBalance` returns 0 for governance-excluded addresses (protocol fee address). This is used by the governance system to determine voting weight. See §18.2.
+
+### 11.7 IProtocolFeeLiquidator
+
+See §18.3 for the liquidator interface specification.
+
+### 11.8 ERC-165 Interface IDs
 
 Conforming implementations MUST support the following interface IDs:
 
@@ -422,45 +503,55 @@ Transition is the irreversible event that converts a certificate-based private s
 
 ### 12.1 Transition Trigger
 
-Transition MUST be explicitly initiated by the issuer. Before initiation, the issuer SHOULD obtain governance approval from existing certificate holders (configurable threshold, RECOMMENDED: supermajority by unit-weighted vote).
+Transition MUST be explicitly initiated by the authority. Before initiation, the authority SHOULD obtain governance approval from existing certificate holders (configurable threshold, RECOMMENDED: supermajority by unit-weighted vote).
 
-The issuer calls `initiateTransition(address vault, address token, TransitionConfig config)`, providing the pre-deployed Vault and Token contract addresses and the transition configuration.
+The transition is a two-step process:
+
+1. **Pre-deploy**: The Vault and Token contracts are deployed independently with their configuration parameters.
+2. **Initiate**: The authority calls `initiateTransition(address vault)` on the StakeCertificates contract. This sets the vault address on the Claim and Stake child contracts (enabling vault-initiated transfers) and sets the `transitioned` flag.
+3. **Process**: The Vault operator calls `processTransitionBatch(stakeIds, liquidationRouter)` to transfer certificates to the vault and mint tokens. This can be batched across multiple transactions for large cap tables.
 
 ### 12.2 Transition Process
 
-The transition executes as an atomic batch operation:
+The `processTransitionBatch` function processes stakes in batches:
 
 ```
-For each certificate (claim or stake) in the system:
-  1. Unlock soulbound status                          (~5,000 gas)
-  2. Transfer certificate to Vault                    (~50,000 gas)
-  3. Mint ERC-20 tokens = vestedUnits of certificate  (~50,000 gas)
-  4. Record lockup expiry for the holder              (~25,000 gas)
-  5. Set TRANSITIONED status flag on certificate      (~5,000 gas)
+For each stake in the batch:
+  1. Transfer certificate from holder to Vault       (~50,000 gas)
+  2. Record deposit metadata (holder, vesting schedule) (~25,000 gas)
+  3. Mint ERC-20 tokens = vestedUnits at transition  (~50,000 gas)
+  4. Set lockup expiry for the holder                (~25,000 gas)
 ```
 
-Total gas per certificate: approximately 130,000. A 50-person cap table transitions in a single transaction for approximately 6.5 million gas, well within Ethereum's 30 million gas block limit.
+The transfer is vault-initiated — the vault calls `transferFrom` on the stake contract, which is authorized in the `_update` hook regardless of soulbound status.
 
-For cap tables exceeding approximately 200 holders, the transition MUST support batched execution across multiple transactions. The `transitioned` flag MUST be set on the first batch call and all subsequent batches MUST check this flag.
+Total gas per stake: approximately 150,000. A 50-person cap table transitions in a single transaction for approximately 7.5 million gas, well within Ethereum's 30 million gas block limit.
 
-Unvested units at the time of transition are NOT lost. The Vault MUST track the original vesting schedule and release tokens as they vest according to the original terms.
+The `transitioned` flag on StakeCertificates is set by `initiateTransition()` (step 1). The `transitionProcessed` flag on the Vault is set on the first `processTransitionBatch()` call. Subsequent batch calls process additional stakes.
+
+Unvested units at the time of transition are NOT lost. The Vault MUST track the original vesting schedule. Anyone can call `releaseVestedTokens(stakeId)` to mint and allocate newly vested tokens to the original holder as they vest.
 
 ### 12.3 Transition Configuration
 
-The `TransitionConfig` struct defines per-project parameters:
+Transition parameters are set at deployment time on the Vault and Token contracts, not passed as a struct to `initiateTransition()`. This allows the vault and token to be independently deployed, verified, and audited before transition.
 
-| Field                   | Type    | Default        | Meaning                                                |
+**Vault constructor parameters:**
+
+| Parameter               | Type    | Default        | Meaning                                                |
 | ----------------------- | ------- | -------------- | ------------------------------------------------------ |
-| lockup_duration         | uint64  | 90 days        | Insider token lockup period after transition            |
-| authorized_supply       | uint256 | (required)     | Hard cap on total token supply                         |
-| public_offering_bps     | uint16  | 1500 (15%)     | Percentage of authorized supply for public offering    |
-| liquidity_bps           | uint16  | 400 (4%)       | Percentage of authorized supply for liquidity pool     |
-| contributor_pool_bps    | uint16  | 1200 (12%)     | Percentage for future contributor compensation         |
-| community_bps           | uint16  | 300 (3%)       | Percentage for community/retroactive rewards           |
-| governance_term_days    | uint32  | 365            | Default governance seat term in days                   |
-| auction_min_bid_bps     | uint16  | 1000 (10%)     | Minimum bid for governance seat as % of cert units     |
-| override_threshold_bps  | uint16  | 5001 (50%+1)   | Token holder override threshold in basis points        |
-| override_quorum_bps     | uint16  | 2000 (20%)     | Token holder override quorum in basis points           |
+| lockupDuration          | uint64  | 90 days        | Insider token lockup period after transition            |
+| governanceTermDays      | uint32  | 365            | Default governance seat term in days                   |
+| auctionMinBidBps        | uint16  | 1000 (10%)     | Minimum bid for governance seat as % of cert units     |
+| overrideThresholdBps    | uint16  | 5001 (50%+1)   | Token holder override threshold in basis points        |
+| overrideQuorumBps       | uint16  | 2000 (20%)     | Token holder override quorum in basis points           |
+
+**Token constructor parameters:**
+
+| Parameter               | Type    | Default        | Meaning                                                |
+| ----------------------- | ------- | -------------- | ------------------------------------------------------ |
+| authorizedSupply        | uint256 | (required)     | Hard cap on total token supply                         |
+
+**Allocation parameters** (public offering, liquidity, contributor pool, community) are offchain planning decisions, not encoded in the contracts. The contracts enforce the authorized supply cap and issuance controls (§14.3) but do not prescribe how the reserved supply is allocated. See §16.2 for recommended defaults.
 
 All basis point parameters use a base of 10,000 (100% = 10000).
 
@@ -501,12 +592,12 @@ The Vault is the central post-transition contract. It receives certificates at t
 
 ### 13.1 Vault Deployment
 
-The Vault contract MUST be deployed before `initiateTransition()` is called. The StakeCertificates contract MUST verify the Vault implements the `IStakeVault` interface before proceeding with transition.
-
-The Vault is initialized with:
-- The address of the StakeCertificates contract (to verify incoming certificates)
-- The address of the StakeToken contract (to mint tokens)
-- The TransitionConfig parameters
+The Vault contract MUST be deployed before `initiateTransition()` is called. The Vault is initialized with:
+- The address of the StakeCertificates contract (resolves to its STAKE child for transfers)
+- The address of the StakeToken contract (for minting tokens)
+- The protocol fee address (for fee token distribution)
+- An operator address (for processing transition batches)
+- Configuration parameters: lockup duration, governance term, auction/override thresholds
 
 ### 13.2 Certificate Custody
 
@@ -520,12 +611,12 @@ The Vault MUST track, for each certificate:
 
 ### 13.3 Token Minting and Distribution
 
-At transition, the Vault mints tokens for each certificate:
+At transition, the Vault mints tokens for each stake certificate:
 
-- **Vested units**: Tokens are minted and held in escrow, claimable after the lockup period.
-- **Unvested units**: Tokens are minted as they vest, following the original vesting schedule. The Vault tracks `vestStart`, `vestCliff`, and `vestEnd` from the original StakeState and releases tokens on a continuous or periodic basis.
+- **Vested units**: Tokens are minted during `processTransitionBatch()` and held in the Vault, claimable after the lockup period.
+- **Unvested units**: Tokens are minted as they vest. Anyone can call `releaseVestedTokens(stakeId)` to calculate newly vested units and mint tokens allocated to the original holder. The Vault tracks `vestStart`, `vestCliff`, and `vestEnd` from the original StakeState.
 
-Token claiming is pull-based: holders call `claimTokens(certificateId)` to withdraw their available (vested, unlocked) tokens.
+Token claiming is pull-based: holders call `claimTokens()` to withdraw their available (vested, unlocked) tokens. The function checks the caller's lockup expiry and transfers all unclaimed tokens.
 
 ### 13.4 Lockup Enforcement
 
@@ -538,12 +629,12 @@ The lockup is enforced at the token contract level via transfer restrictions tha
 
 ### 13.5 Governance Seat Management
 
-The Vault administers the governance seat lifecycle:
+The Vault administers the governance seat lifecycle through explicit steps:
 
-1. **Seat availability**: After transition, all certificates in the Vault are available seats. Seats are assigned staggered initial term expiry dates to ensure governance continuity.
-2. **Auction**: When a seat becomes available, the Vault opens a bidding period. Any token holder may bid. See §15.3.
-3. **Award**: The winning bidder's tokens are deposited, and the certificate is transferred to their wallet (re-locked for the term duration).
-4. **Reclaim**: At term end, anyone MAY call `reclaimSeat(certificateId)`. The Vault forces the certificate back from the governor's wallet and opens a new auction.
+1. **Start auction**: Anyone calls `startSeatAuction(certId)` for a certificate held by the Vault that is not currently governed. Opens a bidding period (default: 7 days).
+2. **Bid**: Token holders call `bidForSeat(certId, amount)` during the bidding period. Tokens are deposited via `transferFrom`. If a higher bid arrives, the previous bidder's tokens are returned. See §15.3.
+3. **Settle**: After the bidding period ends, anyone calls `settleAuction(certId)`. The winning bidder receives the certificate (vault-initiated transfer, bypasses soulbound), and the governance seat is activated for one term.
+4. **Reclaim**: At term end, anyone calls `reclaimSeat(certId)`. The Vault forces the certificate back from the governor's wallet, returns their bid tokens, and marks the seat inactive.
 
 ## 14. Token Standard
 
@@ -579,9 +670,13 @@ The token contract MUST support per-address lockup timestamps:
 mapping(address => uint64) public lockUntil;
 ```
 
-Transfers from a locked address MUST revert, except when the recipient is:
-- The Vault contract (governance seat bids)
-- A governance voting contract (override votes)
+Transfers from a locked address MUST revert, except when the recipient is in the lockup whitelist. The whitelist is initialized at deployment with the Vault and governance contract addresses, and MAY be updated by governance.
+
+```solidity
+mapping(address => bool) public lockupWhitelist;
+```
+
+This allows locked tokens to be used for governance seat bids (deposited to Vault) and override votes (deposited to governance) without creating market sell pressure.
 
 After the lockup timestamp passes, the address is fully unlocked and tokens are freely transferable.
 
@@ -607,13 +702,13 @@ At transition, seats MUST be assigned staggered initial term expiry dates. For `
 
 ### 15.3 Seat Auction
 
-When a governance seat becomes available (initial stagger expiry, term end, or override), the Vault opens a bidding period:
+When a governance seat becomes available, anyone calls `startSeatAuction(certId)` to open a bidding period:
 
-1. **Bidding period**: A fixed window (RECOMMENDED: 7 days) during which any token holder may submit a bid.
-2. **Bid denomination**: Bids are denominated in tokens. The bidder deposits tokens into the Vault as their bid.
-3. **Minimum bid**: The bid MUST meet or exceed the auction floor, calculated as `(certificate.units * auction_min_bid_bps) / 10000` tokens. Default floor: 10% of the certificate's unit count.
-4. **Winner selection**: Highest bid wins. In case of a tie, the first bidder wins.
-5. **Losing bids**: Returned to bidders immediately after the auction closes.
+1. **Bidding period**: A fixed window (default: 7 days) during which any token holder may submit a bid via `bidForSeat(certId, amount)`.
+2. **Bid denomination**: Bids are denominated in tokens. The bidder's tokens are transferred to the Vault via `transferFrom` (requires prior approval).
+3. **Minimum bid**: The bid MUST meet or exceed the auction floor, calculated as `(certificate.units * auctionMinBidBps) / 10000` tokens. Default floor: 10% of the certificate's unit count.
+4. **Outbid handling**: When a higher bid arrives, the previous highest bidder's tokens are returned immediately. Only the current highest bid is held by the Vault at any time.
+5. **Settlement**: After the bidding period ends, anyone calls `settleAuction(certId)`. If there were no bids, the seat stays in the Vault. Otherwise, the winner receives the certificate.
 6. **Winning bid**: Tokens remain deposited in the Vault for the duration of the term. At term end, the tokens are returned to the governor (they paid "rent" for governance by locking capital, not by forfeiting it).
 
 ### 15.4 Certificate Custody During Governance
@@ -633,11 +728,13 @@ At term end, the seat MUST be reclaimed. The `reclaimSeat(uint256 certificateId)
 3. Returns the governor's bid tokens.
 4. Opens a new auction for the seat.
 
-The forced transfer is possible because the certificate contract allows the Vault contract address to transfer tokens regardless of soulbound status. This is enforced in the `_update` hook:
+The forced transfer is possible because the certificate contract allows the Vault contract address to transfer tokens regardless of soulbound status. This is enforced in the `_update` hook via the `auth` parameter (set from `msg.sender` by `transferFrom`):
 
 ```
-if (msg.sender == vault || msg.sender == address(this)) → allow transfer
-else if (from != address(0) && to != address(0)) → revert Soulbound()
+if (from != address(0) && to != address(0)):  // Transfer (not mint/burn)
+    requireNotPaused()
+    if (auth != vault) → revert Soulbound()
+    allow transfer (skip standard auth check)
 ```
 
 ### 15.6 Governance Simplification
@@ -655,14 +752,16 @@ Token holders have one emergency power: replace all governors. This is the nucle
 
 | Parameter | Value |
 | --- | --- |
-| Trigger | Any token holder proposes an override |
-| Voting period | 14 days (RECOMMENDED) |
+| Trigger | Any token holder calls `proposeOverride()` (must have non-zero `governanceBalance`) |
+| Voting period | 14 days |
 | Threshold | 50%+1 of votes cast |
 | Quorum | 20% of total token supply |
-| Effect | All governors removed, all seats return to Vault, emergency auctions for all seats |
+| Effect | All governors removed, all seats return to Vault, bid tokens returned |
 | Cooldown | 90 days before another override can be proposed |
 
-Locked tokens (during the lockup period) MAY vote in override proposals. Override is the only mechanism through which token holders can directly affect governance. All other governance decisions require holding a seat.
+The override flow is: `proposeOverride()` → `voteOverride(proposalId, support)` → `executeOverride(proposalId)`. Each proposal has a unique ID. Voting weight is determined by `governanceBalance` (excludes protocol fee address). Voters can only vote once per proposal.
+
+Locked tokens (during the lockup period) MAY vote in override proposals via `governanceBalance` (which reads `balanceOf`, not transferable balance). Override is the only mechanism through which token holders can directly affect governance. All other governance decisions require holding a seat.
 
 ## 16. Supply Architecture and Anti-Dilution
 
@@ -814,11 +913,11 @@ The reference implementation consists of:
 
 ## 20. Canonical JSON Payloads (Normative Hashing)
 
-Canonical encoding rule for any JSON hashed into content_hash, rights_root inputs, params_hash, vestingHash, conversionHash, revocationHash is RFC 8785 (JSON Canonicalization Scheme, JCS), UTF-8.
+Canonical encoding rule for any JSON hashed into content_hash, rights_root, or params_hash is RFC 8785 (JSON Canonicalization Scheme, JCS), UTF-8.
 
 All hashes in this standard are `keccak256(JCS_bytes)`.
 
-### 19.1 Pact JSON Example
+### 20.1 Pact JSON Example
 
 ```json
 {
@@ -827,9 +926,8 @@ All hashes in this standard are `keccak256(JCS_bytes)`.
   "pact_version": "1.0.0",
   "governing_law": "Delaware",
   "dispute_venue": "Delaware Chancery Court",
-  "mutability": "mutable",
-  "amendment": {"mode": "issuer_only", "scope": "future_only"},
-  "revocation": {"mode": "unvested_only"},
+  "amendment_mode": "issuer_only",
+  "amendment_scope": "future_only",
   "signing_mode": "issuer_only",
   "rights": {
     "power": [{"clause_id": "PWR_VOTE", "enabled": true, "params": {"weight_bps": 10000, "class_vote_required": false}}],
@@ -844,7 +942,9 @@ All hashes in this standard are `keccak256(JCS_bytes)`.
 }
 ```
 
-### 19.2 Conversion JSON Example
+This is the offchain Pact JSON document stored at the URI. Its `keccak256(JCS_bytes)` MUST equal the `content_hash` stored onchain. The onchain Pact struct stores only the fields needed for protocol enforcement (see §5.2.1). The legal terms (governing_law, dispute_venue, amendment rules, signing mode) are offchain-only and verified via `content_hash`.
+
+### 20.2 Conversion JSON Example
 
 ```json
 {
@@ -865,7 +965,7 @@ Conversion modes:
 | FUNDING     | Redeemable upon funding confirmation (offchain)      |
 | ELIGIBILITY | Redeemable upon eligibility verification             |
 
-### 19.3 Vesting JSON Example
+### 20.3 Vesting JSON Example
 
 ```json
 {
@@ -886,7 +986,7 @@ Vesting schedules:
 | MONTHLY   | Monthly cliff vesting                                |
 | CUSTOM    | Custom schedule defined by additional params         |
 
-### 19.4 Transition Config JSON Example
+### 20.4 Transition Config JSON Example
 
 ```json
 {
@@ -907,7 +1007,7 @@ Vesting schedules:
 }
 ```
 
-### 19.5 Governance Seat JSON Example
+### 20.5 Governance Seat JSON Example
 
 ```json
 {
@@ -924,14 +1024,18 @@ Vesting schedules:
 
 ## 21. Security and Operational Notes
 
-### 21.1 Authority Separation
+### 21.1 Authority and Role Separation
 
-Issuer authority SHOULD be a multisig. The reference code uses a single issuer role for simplicity.
+The authority address SHOULD be a multisig for production deployments. The reference implementation uses a single authority EOA that holds all roles.
 
-Conforming implementations SHOULD separate roles:
-- `AUTHORITY_ROLE`: Pact creation, claim issuance, stake conversion
+The coordinator contract separates three roles:
+- `AUTHORITY_ROLE`: Pact creation, claim issuance, stake conversion, transition
 - `PAUSER_ROLE`: Emergency pause/unpause (see §21.5)
 - `DEFAULT_ADMIN_ROLE`: Role administration
+
+Authority is transferable via `transferAuthority(newAuthority)`. This transfers all three roles atomically to the new address and revokes them from the old address. Pre-transition only — authority powers freeze permanently at transition.
+
+The child contracts (StakePactRegistry, SoulboundClaim, SoulboundStake) are administered exclusively by the StakeCertificates coordinator contract. No external EOA holds admin roles on child contracts. This ensures that authority rotation on the coordinator covers all protocol access without residual privilege on child contracts.
 
 ### 21.2 Idempotence
 
