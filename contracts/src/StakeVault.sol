@@ -133,12 +133,14 @@ contract StakeVault is AccessControl, ReentrancyGuard {
     error SeatNotExpired();
     error SeatNotActive();
     error OverrideCooldownActive();
-    error OverrideVotingNotEnded();
+    error VotingPeriodClosed();
+    error VotingPeriodNotEnded();
     error OverrideQuorumNotMet();
     error OverrideThresholdNotMet();
     error AlreadyVoted();
     error InvalidProposal();
     error Unauthorized();
+    error AlreadyDeposited();
 
     constructor(
         address certificates_,
@@ -149,7 +151,8 @@ contract StakeVault is AccessControl, ReentrancyGuard {
         uint32 governanceTermDays_,
         uint16 auctionMinBidBps_,
         uint16 overrideThresholdBps_,
-        uint16 overrideQuorumBps_
+        uint16 overrideQuorumBps_,
+        uint64 auctionDuration_
     ) {
         certificates = StakeCertificates(certificates_);
         stakeContract = certificates.STAKE();
@@ -161,7 +164,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
         auctionMinBidBps = auctionMinBidBps_;
         overrideThresholdBps = overrideThresholdBps_;
         overrideQuorumBps = overrideQuorumBps_;
-        auctionDuration = 7 days;
+        auctionDuration = auctionDuration_;
 
         _grantRole(DEFAULT_ADMIN_ROLE, operator_);
         _grantRole(OPERATOR_ROLE, operator_);
@@ -170,14 +173,13 @@ contract StakeVault is AccessControl, ReentrancyGuard {
     // ============ Transition ============
 
     /**
-     * @notice Process transition: transfer stakes to vault, mint tokens, deploy fee liquidator.
+     * @notice Process transition: transfer stakes to vault and mint tokens.
+     *         Protocol fees accumulate in the vault — call deployLiquidator() after all
+     *         batches are processed to deploy the fee liquidator with all fee tokens.
      * @param stakeIds Array of stake token IDs to process.
-     * @param liquidationRouter Address of the AMM router for protocol fee auto-sell.
-     *        Set to address(0) to skip liquidator deployment (can be deployed later).
      */
     function processTransitionBatch(
-        uint256[] calldata stakeIds,
-        address liquidationRouter
+        uint256[] calldata stakeIds
     )
         external
         onlyRole(OPERATOR_ROLE)
@@ -195,6 +197,10 @@ contract StakeVault is AccessControl, ReentrancyGuard {
 
         for (uint256 i; i < stakeIds.length; i++) {
             uint256 stakeId = stakeIds[i];
+
+            // Prevent duplicate processing — each stakeId can only be deposited once
+            if (depositedStakes[stakeId].originalHolder != address(0)) revert AlreadyDeposited();
+
             address holder = stakeContract.ownerOf(stakeId);
             StakeState memory s = stakeContract.getStake(stakeId);
 
@@ -231,23 +237,14 @@ contract StakeVault is AccessControl, ReentrancyGuard {
         }
 
         // Mint protocol fee (1% of this batch's minted tokens)
+        // Fees always accumulate in the vault until deployLiquidator is called.
+        // This prevents stranding tokens in a liquidator whose totalTokens was
+        // already initialized from an earlier batch.
         if (totalMinted > 0) {
             uint256 protocolFee = (totalMinted * PROTOCOL_FEE_BPS) / BPS_BASE;
             if (protocolFee > 0) {
                 token.mint(address(this), protocolFee);
-
-                // Deploy liquidator on first batch if router provided
-                if (address(protocolFeeLiquidator) == address(0) && liquidationRouter != address(0)) {
-                    protocolFeeBalance += protocolFee;
-                    _deployLiquidator(protocolFeeBalance, liquidationRouter);
-                    protocolFeeBalance = 0;
-                } else if (address(protocolFeeLiquidator) != address(0)) {
-                    // Transfer to existing liquidator
-                    token.transfer(address(protocolFeeLiquidator), protocolFee);
-                } else {
-                    // No liquidator yet — accumulate fee balance
-                    protocolFeeBalance += protocolFee;
-                }
+                protocolFeeBalance += protocolFee;
             }
         }
 
@@ -463,7 +460,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
     function voteOverride(uint256 proposalId, bool support) external {
         if (proposalId >= overrideProposalCount) revert InvalidProposal();
         OverrideProposal storage p = _overrideProposals[proposalId];
-        if (block.timestamp > p.votingEnd) revert OverrideVotingNotEnded();
+        if (block.timestamp > p.votingEnd) revert VotingPeriodClosed();
         if (p.hasVoted[msg.sender]) revert AlreadyVoted();
 
         uint256 weight = token.governanceBalance(msg.sender);
@@ -483,7 +480,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
     function executeOverride(uint256 proposalId) external nonReentrant {
         if (proposalId >= overrideProposalCount) revert InvalidProposal();
         OverrideProposal storage p = _overrideProposals[proposalId];
-        if (block.timestamp <= p.votingEnd) revert OverrideVotingNotEnded();
+        if (block.timestamp <= p.votingEnd) revert VotingPeriodNotEnded();
         if (p.executed) revert InvalidProposal();
 
         // Check quorum

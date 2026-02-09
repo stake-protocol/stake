@@ -30,7 +30,8 @@ import {
     StakeFullyVested,
     AlreadyTransitioned,
     InvalidVault,
-    InvalidAuthority
+    InvalidAuthority,
+    ArrayLengthMismatch
 } from "../src/StakeCertificates.sol";
 
 contract StakeCertificatesTest is Test {

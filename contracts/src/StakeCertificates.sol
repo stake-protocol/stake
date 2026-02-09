@@ -35,10 +35,10 @@ error InvalidUnits();
 error IdempotenceMismatch();
 error StakeFullyVested();
 error AlreadyTransitioned();
-error NotTransitioned();
 error VaultAlreadySet();
 error InvalidVault();
 error InvalidAuthority();
+error ArrayLengthMismatch();
 
 // ============ Enums ============
 
@@ -430,9 +430,8 @@ contract SoulboundClaim is SoulboundERC721 {
         if (to == address(0)) revert InvalidRecipient();
         if (maxUnits == 0) revert InvalidUnits();
 
-        // Verify pact exists
-        Pact memory p = REGISTRY.getPact(pactId);
-        if (p.pactId == bytes32(0)) revert PactNotFound();
+        // Verify pact exists (getPact reverts if not found)
+        REGISTRY.getPact(pactId);
 
         uint256 id = nextId++;
         claimPact[id] = pactId;
@@ -613,9 +612,8 @@ contract SoulboundStake is SoulboundERC721 {
         if (units == 0) revert InvalidUnits();
         if (!(vestStart <= vestCliff && vestCliff <= vestEnd)) revert InvalidVesting();
 
-        // Verify pact exists
-        Pact memory p = REGISTRY.getPact(pactId);
-        if (p.pactId == bytes32(0)) revert PactNotFound();
+        // Verify pact exists (getPact reverts if not found)
+        REGISTRY.getPact(pactId);
 
         uint256 id = nextId++;
         stakePact[id] = pactId;
@@ -922,7 +920,7 @@ contract StakeCertificates is AccessControl, Pausable {
         returns (uint256[] memory)
     {
         uint256 len = issuanceIds.length;
-        if (len != recipients.length || len != maxUnitsArr.length) revert InvalidUnits();
+        if (len != recipients.length || len != maxUnitsArr.length) revert ArrayLengthMismatch();
 
         uint256[] memory claimIds = new uint256[](len);
         for (uint256 i = 0; i < len; i++) {
