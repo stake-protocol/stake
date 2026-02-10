@@ -266,18 +266,26 @@ Pre-board (solo founder), there are no dilution protections — and there don't 
 
 ## 15. Death and Inheritance
 
-**Decision**: The protocol has no built-in inheritance mechanism. Estate planning is the holder's responsibility. If wallet keys are available, the executor operates the wallet directly. If keys are lost, the authority can issue compensating Stakes to beneficiaries.
+**Decision**: The protocol has no built-in inheritance mechanism. Wallet recovery is handled at the application layer through embedded wallets (see Decision 19). The protocol does not attempt to adjudicate death, verify heirs, or transfer soulbound certificates.
 
-**Rationale**: Any on-chain inheritance mechanism requires answering "who decides someone is dead?" — which is a legal question, not a protocol question. Adding a "death oracle" or "beneficiary designation" function creates attack surface (fraudulent death claims, social engineering) that's worse than the problem it solves.
+**How traditional equity handles death**: When a shareholder dies, the executor presents a death certificate and probate documents to the transfer agent. The transfer agent re-registers the *existing* shares in the beneficiary's name. Shares are never destroyed and never reissued — they are reassigned on the ledger. The company cannot reclaim them. The company does not issue new shares to replace the old ones. The shares themselves are unchanged; only the registered owner changes.
 
-How it works in practice:
-1. **Keys available**: Executor uses wallet to participate in governance, receive tokens post-transition, or burn Stakes per court order. No protocol changes needed.
-2. **Keys lost, pre-transition**: Authority issues a new Claim→Stake to the beneficiary for the same units. The orphaned Stake inflates total outstanding slightly, but this is manageable.
-3. **Keys lost, post-transition**: The orphaned Stake can never be deposited in the vault. Those tokens are effectively locked forever (reducing circulating supply). Governance can vote to issue compensating tokens to beneficiaries.
+**The soulbound challenge**: With soulbound onchain certificates, there is no transfer agent ledger to update. The certificate IS the ledger. If the holder's wallet keys are available, the executor operates the wallet directly — this is the straightforward case. If keys are genuinely lost, the Stake is permanently inaccessible. Unlike traditional equity, there is no intermediary who can re-register ownership.
+
+**Why we don't solve this at the protocol level**: Any on-chain inheritance mechanism requires answering "who decides someone is dead?" — a legal question, not a protocol question. Adding a death oracle or beneficiary designation creates attack surface (fraudulent death claims, social engineering) worse than the problem it solves. Attempting to mimic the transfer agent role at the smart contract level would reintroduce the centralized intermediary that the entire protocol is designed to eliminate.
+
+**How it works in practice**:
+1. **Keys available** (the expected case): Executor operates the wallet directly. Participates in governance, receives tokens post-transition, or burns Stakes per court order.
+2. **Keys lost, pre-transition**: The authority can issue a compensating Claim→Stake to the beneficiary for the same units. The orphaned Stake inflates total outstanding. This is an imperfect solution — it creates phantom equity — but it's the same outcome as any permanently lost crypto asset.
+3. **Keys lost, post-transition**: The orphaned Stake cannot be deposited in the vault. Those tokens are never minted and effectively don't exist. Governance can vote to issue compensating tokens to verified beneficiaries.
+
+**The real solution is at the wallet layer**: Embedded wallets (see Decision 19) eliminate the key loss problem entirely. If holders authenticate through existing wallets, passkeys, or email — with no seed phrase to lose — then death/inheritance reduces to "does the executor have access to the holder's authentication methods?" This is the same problem as inheriting any online account, and it has well-understood solutions (password managers, estate planning tools, legal access to email).
+
+**The inflation question**: If a holder dies and their Stake is permanently inaccessible, it inflates the outstanding share count. Is this acceptable? In practice, yes. The same thing happens with lost Bitcoin — approximately 4 million BTC are estimated permanently lost, and the market prices around it. Post-transition, orphaned Stakes reduce circulating supply (tokens that are never claimed), which is actually deflationary for remaining holders. Pre-transition, governance can account for known orphaned Stakes in dilution calculations.
 
 **Counterpoints**:
-- "This is worse than traditional equity, where transfer agents handle inheritance." — True, but traditional equity relies on centralized intermediaries (the exact problem we're solving). The tradeoff is self-sovereignty vs. assisted recovery. We choose self-sovereignty and push recovery to the legal/estate layer.
-- "Social recovery contracts could solve this." — Possibly, but that's a wallet-level concern, not a certificate-level concern. If the user's wallet supports social recovery, their Stakes benefit automatically.
+- "Traditional equity never has this problem." — Correct. Traditional equity relies on centralized intermediaries (transfer agents, registrars) who can re-register ownership. This is the fundamental tradeoff of self-sovereign ownership: stronger property rights in exchange for stronger personal responsibility. The protocol chooses self-sovereignty and pushes recovery to the wallet/application layer.
+- "Court orders could require share transfer to heirs." — The protocol can't transfer soulbound tokens. A court can order the estate to produce wallet keys, or the authority/governance can issue compensating equity to the heirs. The burn mechanism (Decision 5) also allows heirs with wallet access to surrender equity if needed.
 
 ---
 
@@ -324,3 +332,81 @@ Why separate from revocation? Because RevocationMode.NONE should mean "normal re
 **Counterpoints**:
 - "Void on a NONE Pact undermines the NONE guarantee." — The distinction is intent. NONE means "the founder won't revoke your vesting." Void means "this Claim was issued in error." Holders of NONE Claims should understand that void is a safety valve, not a backdoor. The reasonHash on void provides an auditable record of why it was used.
 - "The authority could abuse void." — True. But the authority can also refuse to redeem Claims or refuse to create Pacts. Pre-transition authority power is inherently broad. That's why the transition freeze exists — it permanently removes the authority's ability to void (or do anything else).
+
+---
+
+## 19. Embedded Wallets as the Recommended Holder Interface
+
+**Decision**: The protocol recommends that all Stake holders interact through embedded wallets — wallets authenticated via existing wallets, passkeys, or email rather than raw seed phrases. This is an application-layer recommendation, not a protocol-level enforcement.
+
+**Rationale**: The single greatest risk to onchain equity holders is not smart contract bugs or governance attacks — it's key loss. A lost seed phrase means permanently inaccessible equity with no recovery path. This is fundamentally different from traditional equity, where a lost stock certificate can be replaced by the transfer agent.
+
+Embedded wallets (Privy, Dynamic, Turnkey, Web3Auth, etc.) solve this by removing seed phrases entirely:
+- **Authentication through existing credentials** — Holder connects with their existing wallet(s), email, or passkeys. No 12-word phrase to write down and lose.
+- **Multi-signer support** — Multiple wallets or authentication methods can control the same embedded wallet. Losing one doesn't mean losing access.
+- **Passkey support** — Biometric authentication (Face ID, fingerprint) as a wallet signer. Hardware-bound, phishing-resistant, and familiar to non-crypto users.
+- **Recovery paths** — If a holder loses their primary auth method, backup methods (secondary wallet, email, passkey on another device) restore access.
+
+**Why not enforce this at the protocol level**: The protocol is permissionless. Any Ethereum address can hold a Claim or Stake. Mandating a specific wallet type would compromise composability and censorship resistance. Instead, the applications built on the protocol (the cap table management tools, the onboarding flows) should default to embedded wallets and strongly discourage raw EOA usage for equity holding.
+
+**How this resolves other risks**:
+- **Key loss**: Eliminated by design — there are no keys to lose
+- **Death/inheritance**: Reduces to "does the executor have access to the holder's email/device?" — a solved problem in estate law
+- **Fraud via false key-loss claims**: If a holder claims they lost access but actually didn't, the embedded wallet provider's logs can verify whether the account was accessed. This is far more auditable than "I lost my seed phrase."
+
+**Counterpoints**:
+- "Embedded wallets introduce a centralized dependency." — The wallet provider is a convenience layer, not a custodian. The private key is still held by the user (via MPC, enclave, or passkey). If the provider disappears, the key can be exported. This is different from custodial solutions where the provider holds the key.
+- "What if the embedded wallet provider is compromised?" — Same risk as any authentication provider. Mitigation: multi-signer setup where the embedded wallet is one of N signers. The protocol's soulbound property means a compromised wallet can't transfer Stakes to the attacker — the worst case is a burn (which is visible on-chain and auditable).
+- "Crypto-native holders prefer their own wallets." — Fine. The protocol doesn't prevent this. But for the 99% of equity holders who are not crypto-native, embedded wallets are the right default.
+
+---
+
+## 20. Private Key Loss
+
+**Decision**: If a holder loses access to their wallet and has no recovery path, their Stakes are permanently inaccessible. The protocol does not provide an override mechanism for the authority or board to recover or reissue Stakes on behalf of the holder.
+
+**Rationale**: Any recovery mechanism that allows a third party (authority, board, admin) to reassign or reissue Stakes creates a backdoor that undermines the core property: irrevocability. If the authority can "recover" a lost Stake by issuing a new one and voiding the old one... wait, Stakes can't be voided. That's the point.
+
+The temptation is to add a recovery function: "if the holder can prove they lost access, the authority reissues." But this creates an unfalsifiable claim problem — there is no cryptographic way to prove a private key is lost. The holder could be lying (to get double equity), or a social engineer could impersonate the holder. Any recovery mechanism based on identity verification reintroduces the trusted intermediary.
+
+**Practical mitigation**:
+1. **Embedded wallets** (Decision 19) eliminate seed phrase loss entirely
+2. **Multi-signer wallets** provide redundancy — lose one key, recover via another
+3. **Pre-transition**: Authority can issue a compensating Claim→Stake to the holder's new address, accepting the inflation of outstanding units as a cost of the error
+4. **Post-transition**: Inaccessible Stakes don't receive tokens. The unclaimed tokens remain in the vault and can be redistributed by governance vote.
+
+**The inflation tradeoff**: If the authority reissues a compensating Stake, total outstanding units increase. The orphaned Stake still exists — it just can't be used. This is equivalent to "phantom shares" — equity that exists on paper but has no active holder. In small quantities, this is manageable. In large quantities, it signals an operational problem (holders not using embedded wallets). The protocol accepts this tradeoff rather than compromising irrevocability.
+
+**Counterpoints**:
+- "Traditional equity doesn't have this problem." — Because traditional equity relies on centralized registrars who can re-register ownership. Every feature of centralized registrars that makes recovery possible also makes censorship and seizure possible. The protocol chooses censorship resistance over assisted recovery.
+- "Could a dead man's switch help?" — A time-locked recovery mechanism (if no activity for X months, transfer to designated address) is interesting but dangerous. It creates a new attack vector: wait for the holder to go on vacation and claim their equity. It also contradicts soulbound — if there's a path to transfer under any condition, it's not truly soulbound. Better to solve this at the wallet layer.
+
+---
+
+## 21. Holder-Initiated Forfeiture (Burn)
+
+**Decision**: Stake holders can burn (permanently destroy) their own Stakes at any time by calling `burn(stakeId)`. No approval from the authority, board, or any third party is required. The burn is irreversible.
+
+**Rationale**: Traditional equity holders can surrender shares. This happens in practice:
+- **Voluntary surrender** — Founder returns shares to simplify the cap table before a raise
+- **Tax write-off** — Holder writes off worthless equity (Section 165 loss in US tax law)
+- **Court-ordered forfeiture** — Court orders the holder to surrender shares; holder complies
+- **Buyback completion** — Company pays the holder (off-chain), holder destroys the certificate
+- **Estate cleanup** — Winding down a defunct company, clearing abandoned equity
+
+Without burn, soulbound Stakes would accumulate forever — even after the company is dissolved, the equity is worthless, or a court has ordered forfeiture. Burn gives holders sovereignty over their own property, including the right to destroy it.
+
+**Implementation**: `burn(stakeId)` checks `ownerOf(stakeId) == msg.sender`, cleans up storage (StakeState and pact mapping), and calls the ERC-721 internal `_burn`. This is the same pattern as ERC-20 burn functions (OpenZeppelin's ERC20Burnable), which are commonplace on Ethereum — nearly every major token supports holder-initiated burn.
+
+**What burn is NOT**:
+- Not revocation — the authority cannot burn someone else's Stake
+- Not pausable — holder can burn even when the contract is paused
+- Not restricted by transition — holder can burn pre-transition or post-transition
+- Not conditional — no reason required, no approval needed
+
+**How burn enables buyback without protocol-level mechanism**: The company negotiates a buyback off-chain (paying the holder in fiat, ETH, stablecoins, etc.). Once payment is confirmed, the holder burns their Stake. The protocol doesn't need to facilitate the payment — just the destruction. This is simpler, more flexible, and doesn't require the protocol to understand payment rails.
+
+**Counterpoints**:
+- "Can someone be coerced into burning?" — Yes, but coercion is a legal matter, not a protocol matter. Courts coerce people into surrendering property all the time (garnishment, forfeiture, divorce settlements). The protocol provides the mechanism; enforcement is legal.
+- "What if a holder burns by mistake?" — Irreversible by design. The authority can issue a replacement Claim→Stake if the burn was accidental. This is no different from accidentally sending ETH to the wrong address — blockchain transactions are final.
+- "Burning reduces outstanding units — does that affect other holders?" — Yes. Burning is equivalent to share cancellation/retirement. Remaining holders' percentage ownership increases slightly. This is expected and desirable in buyback scenarios.

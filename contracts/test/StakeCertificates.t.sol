@@ -31,7 +31,8 @@ import {
     AlreadyTransitioned,
     InvalidVault,
     InvalidAuthority,
-    ArrayLengthMismatch
+    ArrayLengthMismatch,
+    NotHolder
 } from "../src/StakeCertificates.sol";
 
 contract StakeCertificatesTest is Test {
@@ -615,6 +616,87 @@ contract StakeCertificatesTest is Test {
         vm.prank(recipient);
         vm.expectRevert(Soulbound.selector);
         stake.transferFrom(recipient, recipient2, stakeId);
+    }
+
+    // ============ Burn Tests ============
+
+    function test_BurnStake_HolderCanBurn() public {
+        vm.startPrank(authority);
+        (, uint256 stakeId) = _issueAndRedeem(
+            keccak256("burn-test"), keccak256("burn-test-r"), recipient, 1000
+        );
+        vm.stopPrank();
+
+        // Holder burns their own stake
+        vm.prank(recipient);
+        stake.burn(stakeId);
+
+        // Stake no longer exists
+        assertFalse(stake.exists(stakeId));
+    }
+
+    function test_BurnStake_NonHolderReverts() public {
+        vm.startPrank(authority);
+        (, uint256 stakeId) = _issueAndRedeem(
+            keccak256("burn-nonholder"), keccak256("burn-nonholder-r"), recipient, 1000
+        );
+        vm.stopPrank();
+
+        // Authority cannot burn holder's stake
+        vm.prank(authority);
+        vm.expectRevert(NotHolder.selector);
+        stake.burn(stakeId);
+
+        // Random address cannot burn
+        vm.prank(address(0x999));
+        vm.expectRevert(NotHolder.selector);
+        stake.burn(stakeId);
+    }
+
+    function test_BurnStake_CleansUpState() public {
+        vm.startPrank(authority);
+        (, uint256 stakeId) = _issueAndRedeem(
+            keccak256("burn-cleanup"), keccak256("burn-cleanup-r"), recipient, 1000
+        );
+        vm.stopPrank();
+
+        // Verify state exists before burn
+        StakeState memory s = stake.getStake(stakeId);
+        assertEq(s.units, 1000);
+
+        vm.prank(recipient);
+        stake.burn(stakeId);
+
+        // getStake reverts after burn
+        vm.expectRevert(StakeNotFound.selector);
+        stake.getStake(stakeId);
+    }
+
+    function test_BurnStake_WorksWhenPaused() public {
+        vm.startPrank(authority);
+        (, uint256 stakeId) = _issueAndRedeem(
+            keccak256("burn-paused"), keccak256("burn-paused-r"), recipient, 1000
+        );
+        certificates.pause();
+        vm.stopPrank();
+
+        // Holder can still burn when paused — it's their property
+        vm.prank(recipient);
+        stake.burn(stakeId);
+        assertFalse(stake.exists(stakeId));
+    }
+
+    function test_BurnStake_EmitsEvent() public {
+        vm.startPrank(authority);
+        (, uint256 stakeId) = _issueAndRedeem(
+            keccak256("burn-event"), keccak256("burn-event-r"), recipient, 1000
+        );
+        vm.stopPrank();
+
+        vm.prank(recipient);
+        vm.expectEmit(true, true, false, false);
+        emit SoulboundStake.StakeBurned(stakeId, recipient);
+        stake.burn(stakeId);
     }
 
     // ============ Pause Tests ============

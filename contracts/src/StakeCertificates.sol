@@ -40,6 +40,7 @@ error InvalidVault();
 error InvalidAuthority();
 error ArrayLengthMismatch();
 error NothingToRedeem();
+error NotHolder();
 
 // ============ Enums ============
 
@@ -636,6 +637,7 @@ contract SoulboundStake is SoulboundERC721 {
     event StakeMinted(
         uint256 indexed stakeId, bytes32 indexed pactId, address indexed to, uint256 units, UnitType unitType
     );
+    event StakeBurned(uint256 indexed stakeId, address indexed holder);
 
     constructor(
         address issuer_,
@@ -687,6 +689,18 @@ contract SoulboundStake is SoulboundERC721 {
         _mintSoulbound(to, id);
         emit StakeMinted(id, pactId, to, units, unitType);
         return id;
+    }
+
+    /**
+     * @notice Holder burns their own stake. Irreversible.
+     *         Only the current holder can call this.
+     */
+    function burn(uint256 stakeId) external {
+        if (ownerOf(stakeId) != msg.sender) revert NotHolder();
+        delete _stakes[stakeId];
+        delete stakePact[stakeId];
+        _burn(stakeId);
+        emit StakeBurned(stakeId, msg.sender);
     }
 
     /**
