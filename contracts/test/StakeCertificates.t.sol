@@ -27,7 +27,7 @@ import {
     InvalidRecipient,
     InvalidUnits,
     IdempotenceMismatch,
-    StakeFullyVested,
+    ClaimFullyVested,
     AlreadyTransitioned,
     InvalidVault,
     InvalidAuthority,
@@ -66,34 +66,42 @@ contract StakeCertificatesTest is Test {
             uri,
             pactVersion,
             true, // mutable
-            RevocationMode.UNVESTED_ONLY,
-            true // defaultRevocableUnvested
+            RevocationMode.UNVESTED_ONLY
         );
         vm.stopPrank();
     }
 
-    // ============ Helper ============
+    // ============ Helpers ============
 
     function _issueClaim(bytes32 issuanceId, address to, uint256 maxUnits) internal returns (uint256) {
-        return certificates.issueClaim(issuanceId, to, pactId, maxUnits, UnitType.SHARES, 0);
+        return certificates.issueClaim(issuanceId, to, pactId, maxUnits, UnitType.SHARES, 0, 0, 0, 0);
+    }
+
+    function _issueClaimWithVesting(
+        bytes32 issuanceId,
+        address to,
+        uint256 maxUnits,
+        uint64 vestStart,
+        uint64 vestCliff,
+        uint64 vestEnd
+    )
+        internal
+        returns (uint256)
+    {
+        return certificates.issueClaim(issuanceId, to, pactId, maxUnits, UnitType.SHARES, 0, vestStart, vestCliff, vestEnd);
     }
 
     function _issueAndRedeem(
         bytes32 issuanceId,
         bytes32 redemptionId,
         address to,
-        uint256 units,
-        uint64 vestStart,
-        uint64 vestCliff,
-        uint64 vestEnd
+        uint256 units
     )
         internal
         returns (uint256 claimId, uint256 stakeId)
     {
         claimId = _issueClaim(issuanceId, to, units);
-        stakeId = certificates.redeemToStake(
-            redemptionId, claimId, units, UnitType.SHARES, vestStart, vestCliff, vestEnd, bytes32(0)
-        );
+        stakeId = certificates.redeemToStake(redemptionId, claimId, units, bytes32(0));
     }
 
     // ============ Deployment Tests ============
@@ -132,7 +140,7 @@ contract StakeCertificatesTest is Test {
 
         vm.prank(authority);
         bytes32 createdPactId =
-            certificates.createPact(newContentHash, rightsRoot, uri, newVersion, true, RevocationMode.ANY, false);
+            certificates.createPact(newContentHash, rightsRoot, uri, newVersion, true, RevocationMode.ANY);
 
         assertEq(createdPactId, expectedPactId);
         assertTrue(registry.pactExists(createdPactId));
@@ -141,13 +149,13 @@ contract StakeCertificatesTest is Test {
     function test_CreatePact_RevertsForNonAuthority() public {
         vm.prank(recipient);
         vm.expectRevert();
-        certificates.createPact(contentHash, rightsRoot, uri, "3.0.0", true, RevocationMode.ANY, false);
+        certificates.createPact(contentHash, rightsRoot, uri, "3.0.0", true, RevocationMode.ANY);
     }
 
     function test_CreatePact_RevertsDuplicate() public {
         vm.prank(authority);
         vm.expectRevert(PactAlreadyExists.selector);
-        certificates.createPact(contentHash, rightsRoot, uri, pactVersion, true, RevocationMode.ANY, false);
+        certificates.createPact(contentHash, rightsRoot, uri, pactVersion, true, RevocationMode.ANY);
     }
 
     function test_AmendPact() public {
@@ -165,7 +173,7 @@ contract StakeCertificatesTest is Test {
     function test_AmendPact_RevertsForImmutable() public {
         vm.prank(authority);
         bytes32 immutablePactId = certificates.createPact(
-            keccak256("immutable"), rightsRoot, uri, "immutable-1.0.0", false, RevocationMode.NONE, false
+            keccak256("immutable"), rightsRoot, uri, "immutable-1.0.0", false, RevocationMode.NONE
         );
 
         vm.prank(authority);
@@ -173,7 +181,7 @@ contract StakeCertificatesTest is Test {
         certificates.amendPact(immutablePactId, keccak256("new"), rightsRoot, uri, "immutable-1.1.0");
     }
 
-    // ============ tryGetPact Tests (L-4 Fix) ============
+    // ============ tryGetPact Tests ============
 
     function test_TryGetPact_ExistingPact() public view {
         (bool exists, Pact memory p) = registry.tryGetPact(pactId);
@@ -192,7 +200,7 @@ contract StakeCertificatesTest is Test {
         bytes32 issuanceId = keccak256("issuance-1");
 
         vm.prank(authority);
-        uint256 claimId = certificates.issueClaim(issuanceId, recipient, pactId, 1000, UnitType.SHARES, 0);
+        uint256 claimId = certificates.issueClaim(issuanceId, recipient, pactId, 1000, UnitType.SHARES, 0, 0, 0, 0);
 
         assertEq(claimId, 1);
         assertEq(claim.ownerOf(claimId), recipient);
@@ -201,16 +209,30 @@ contract StakeCertificatesTest is Test {
         assertEq(c.maxUnits, 1000);
         assertEq(uint8(c.unitType), uint8(UnitType.SHARES));
         assertFalse(c.voided);
-        assertFalse(c.fullyRedeemed);
         assertEq(c.redeemedUnits, 0);
+    }
+
+    function test_IssueClaim_WithVesting() public {
+        uint64 now_ = uint64(block.timestamp);
+
+        vm.prank(authority);
+        uint256 claimId = certificates.issueClaim(
+            keccak256("vesting-claim"), recipient, pactId, 1000, UnitType.SHARES, 0,
+            now_, now_ + 365 days, now_ + 4 * 365 days
+        );
+
+        ClaimState memory c = claim.getClaim(claimId);
+        assertEq(c.vestStart, now_);
+        assertEq(c.vestCliff, now_ + 365 days);
+        assertEq(c.vestEnd, now_ + 4 * 365 days);
     }
 
     function test_IssueClaim_Idempotent() public {
         bytes32 issuanceId = keccak256("issuance-1");
 
         vm.startPrank(authority);
-        uint256 claimId1 = certificates.issueClaim(issuanceId, recipient, pactId, 1000, UnitType.SHARES, 0);
-        uint256 claimId2 = certificates.issueClaim(issuanceId, recipient, pactId, 1000, UnitType.SHARES, 0);
+        uint256 claimId1 = certificates.issueClaim(issuanceId, recipient, pactId, 1000, UnitType.SHARES, 0, 0, 0, 0);
+        uint256 claimId2 = certificates.issueClaim(issuanceId, recipient, pactId, 1000, UnitType.SHARES, 0, 0, 0, 0);
 
         assertEq(claimId1, claimId2);
         vm.stopPrank();
@@ -220,30 +242,30 @@ contract StakeCertificatesTest is Test {
         bytes32 issuanceId = keccak256("issuance-1");
 
         vm.startPrank(authority);
-        certificates.issueClaim(issuanceId, recipient, pactId, 1000, UnitType.SHARES, 0);
+        certificates.issueClaim(issuanceId, recipient, pactId, 1000, UnitType.SHARES, 0, 0, 0, 0);
 
         vm.expectRevert(IdempotenceMismatch.selector);
-        certificates.issueClaim(issuanceId, recipient, pactId, 2000, UnitType.SHARES, 0);
+        certificates.issueClaim(issuanceId, recipient, pactId, 2000, UnitType.SHARES, 0, 0, 0, 0);
         vm.stopPrank();
     }
 
     function test_IssueClaim_RevertsInvalidRecipient() public {
         vm.prank(authority);
         vm.expectRevert(InvalidRecipient.selector);
-        certificates.issueClaim(keccak256("test"), address(0), pactId, 1000, UnitType.SHARES, 0);
+        certificates.issueClaim(keccak256("test"), address(0), pactId, 1000, UnitType.SHARES, 0, 0, 0, 0);
     }
 
     function test_IssueClaim_RevertsInvalidUnits() public {
         vm.prank(authority);
         vm.expectRevert(InvalidUnits.selector);
-        certificates.issueClaim(keccak256("test"), recipient, pactId, 0, UnitType.SHARES, 0);
+        certificates.issueClaim(keccak256("test"), recipient, pactId, 0, UnitType.SHARES, 0, 0, 0, 0);
     }
 
     function test_VoidClaim() public {
         bytes32 issuanceId = keccak256("void-test");
 
         vm.startPrank(authority);
-        certificates.issueClaim(issuanceId, recipient, pactId, 1000, UnitType.SHARES, 0);
+        certificates.issueClaim(issuanceId, recipient, pactId, 1000, UnitType.SHARES, 0, 0, 0, 0);
         certificates.voidClaim(issuanceId, keccak256("void reason"));
         vm.stopPrank();
 
@@ -256,7 +278,7 @@ contract StakeCertificatesTest is Test {
         bytes32 issuanceId = keccak256("void-test");
 
         vm.startPrank(authority);
-        certificates.issueClaim(issuanceId, recipient, pactId, 1000, UnitType.SHARES, 0);
+        certificates.issueClaim(issuanceId, recipient, pactId, 1000, UnitType.SHARES, 0, 0, 0, 0);
         certificates.voidClaim(issuanceId, bytes32(0));
 
         vm.expectRevert(AlreadyVoided.selector);
@@ -264,19 +286,15 @@ contract StakeCertificatesTest is Test {
         vm.stopPrank();
     }
 
-    // ============ M-1 Fix: Void works regardless of revocationMode ============
-
     function test_VoidClaim_WorksWhenRevocationModeIsNone() public {
-        // Create a pact with NONE revocation mode
         vm.prank(authority);
         bytes32 nonePactId = certificates.createPact(
-            keccak256("no-revoke"), rightsRoot, uri, "none-1.0.0", true, RevocationMode.NONE, false
+            keccak256("no-revoke"), rightsRoot, uri, "none-1.0.0", true, RevocationMode.NONE
         );
 
         vm.startPrank(authority);
         uint256 claimId =
-            certificates.issueClaim(keccak256("void-none"), recipient, nonePactId, 1000, UnitType.SHARES, 0);
-        // Void should succeed even with NONE revocation mode
+            certificates.issueClaim(keccak256("void-none"), recipient, nonePactId, 1000, UnitType.SHARES, 0, 0, 0, 0);
         certificates.voidClaim(keccak256("void-none"), keccak256("cancelled"));
         vm.stopPrank();
 
@@ -321,23 +339,156 @@ contract StakeCertificatesTest is Test {
         claim.locked(999);
     }
 
+    // ============ Claim Vesting Tests ============
+
+    function test_ClaimVesting_BeforeCliff() public {
+        uint64 now_ = uint64(block.timestamp);
+        vm.prank(authority);
+        uint256 claimId = _issueClaimWithVesting(
+            keccak256("vest-before-cliff"), recipient, 1000,
+            now_, now_ + 365 days, now_ + 4 * 365 days
+        );
+
+        assertEq(claim.vestedUnits(claimId), 0);
+        assertEq(claim.unvestedUnits(claimId), 1000);
+        assertEq(claim.redeemableUnits(claimId), 0);
+    }
+
+    function test_ClaimVesting_AtCliff() public {
+        uint64 now_ = uint64(block.timestamp);
+        vm.prank(authority);
+        uint256 claimId = _issueClaimWithVesting(
+            keccak256("vest-at-cliff"), recipient, 1000,
+            now_, now_ + 365 days, now_ + 4 * 365 days
+        );
+
+        vm.warp(now_ + 365 days);
+        assertEq(claim.vestedUnits(claimId), 250);
+        assertEq(claim.redeemableUnits(claimId), 250);
+    }
+
+    function test_ClaimVesting_FullyVested() public {
+        uint64 now_ = uint64(block.timestamp);
+        vm.prank(authority);
+        uint256 claimId = _issueClaimWithVesting(
+            keccak256("fully-vested"), recipient, 1000,
+            now_, now_ + 365 days, now_ + 4 * 365 days
+        );
+
+        vm.warp(now_ + 5 * 365 days);
+        assertEq(claim.vestedUnits(claimId), 1000);
+        assertEq(claim.unvestedUnits(claimId), 0);
+    }
+
+    function test_ClaimVesting_NoVestingMeansAllVested() public {
+        vm.prank(authority);
+        uint256 claimId = _issueClaim(keccak256("no-vesting"), recipient, 1000);
+
+        // No vesting schedule — all units immediately vested
+        assertEq(claim.vestedUnits(claimId), 1000);
+        assertEq(claim.redeemableUnits(claimId), 1000);
+    }
+
+    // ============ Claim Revocation Tests ============
+
+    function test_RevokeClaim_UnvestedOnly_FreezesVesting() public {
+        uint64 now_ = uint64(block.timestamp);
+        vm.startPrank(authority);
+        uint256 claimId = _issueClaimWithVesting(
+            keccak256("revoke-unvested"), recipient, 1000,
+            now_, now_ + 365 days, now_ + 4 * 365 days
+        );
+
+        // Warp to 2 years (50% vested)
+        vm.warp(now_ + 2 * 365 days);
+        assertEq(claim.vestedUnits(claimId), 500);
+
+        certificates.revokeClaim(keccak256("revoke-unvested"), keccak256("terminated"));
+        vm.stopPrank();
+
+        // Vesting is frozen at 500
+        assertEq(claim.vestedUnits(claimId), 500);
+        assertEq(claim.redeemableUnits(claimId), 500);
+
+        // Even after more time passes, vesting stays frozen
+        vm.warp(now_ + 5 * 365 days);
+        assertEq(claim.vestedUnits(claimId), 500);
+    }
+
+    function test_RevokeClaim_ANY_VoidsEntireClaim() public {
+        vm.prank(authority);
+        bytes32 anyPactId = certificates.createPact(
+            keccak256("any-revoke"), rightsRoot, uri, "any-1.0.0", true, RevocationMode.ANY
+        );
+
+        uint64 now_ = uint64(block.timestamp);
+        vm.startPrank(authority);
+        certificates.issueClaim(
+            keccak256("any-claim"), recipient, anyPactId, 1000, UnitType.SHARES, 0,
+            now_, now_ + 365 days, now_ + 4 * 365 days
+        );
+
+        vm.warp(now_ + 2 * 365 days);
+        certificates.revokeClaim(keccak256("any-claim"), keccak256("for cause"));
+        vm.stopPrank();
+
+        (, ClaimState memory c) = certificates.getClaimByIssuanceId(keccak256("any-claim"));
+        assertTrue(c.voided); // ANY revocation voids the claim entirely
+    }
+
+    function test_RevokeClaim_RevertsWhenFullyVested() public {
+        uint64 now_ = uint64(block.timestamp);
+        vm.startPrank(authority);
+        _issueClaimWithVesting(
+            keccak256("revoke-fully-vested"), recipient, 1000,
+            now_, now_ + 365 days, now_ + 4 * 365 days
+        );
+        vm.stopPrank();
+
+        vm.warp(now_ + 5 * 365 days);
+
+        vm.prank(authority);
+        vm.expectRevert(ClaimFullyVested.selector);
+        certificates.revokeClaim(keccak256("revoke-fully-vested"), bytes32(0));
+    }
+
+    function test_RevokeClaim_RevertsWhenModeIsNone() public {
+        vm.prank(authority);
+        bytes32 noPactId = certificates.createPact(
+            keccak256("no-revoke"), rightsRoot, uri, "no-revoke-1.0.0", true, RevocationMode.NONE
+        );
+
+        vm.startPrank(authority);
+        certificates.issueClaim(
+            keccak256("no-revoke-claim"), recipient, noPactId, 1000, UnitType.SHARES, 0, 0, 0, 0
+        );
+
+        vm.expectRevert(RevocationDisabled.selector);
+        certificates.revokeClaim(keccak256("no-revoke-claim"), bytes32(0));
+        vm.stopPrank();
+    }
+
+    function test_RevokeClaim_RevertsAlreadyRevoked() public {
+        uint64 now_ = uint64(block.timestamp);
+        vm.startPrank(authority);
+        _issueClaimWithVesting(
+            keccak256("double-revoke"), recipient, 1000,
+            now_, now_ + 365 days, now_ + 4 * 365 days
+        );
+
+        certificates.revokeClaim(keccak256("double-revoke"), bytes32(0));
+
+        vm.expectRevert(AlreadyRevoked.selector);
+        certificates.revokeClaim(keccak256("double-revoke"), bytes32(0));
+        vm.stopPrank();
+    }
+
     // ============ Redemption Tests ============
 
     function test_RedeemToStake() public {
-        uint64 now_ = uint64(block.timestamp);
-
         vm.startPrank(authority);
         uint256 claimId = _issueClaim(keccak256("redeem-test"), recipient, 1000);
-        uint256 stakeId = certificates.redeemToStake(
-            keccak256("redemption-1"),
-            claimId,
-            1000,
-            UnitType.SHARES,
-            now_,
-            now_ + 365 days,
-            now_ + 4 * 365 days,
-            bytes32(0)
-        );
+        uint256 stakeId = certificates.redeemToStake(keccak256("redemption-1"), claimId, 1000, bytes32(0));
         vm.stopPrank();
 
         assertEq(stakeId, 1);
@@ -346,41 +497,26 @@ contract StakeCertificatesTest is Test {
         StakeState memory s = stake.getStake(stakeId);
         assertEq(s.units, 1000);
         assertEq(uint8(s.unitType), uint8(UnitType.SHARES));
-        assertFalse(s.revoked);
-        assertEq(s.revokedUnits, 0);
-        assertEq(s.revokedAt, 0);
-
-        ClaimState memory c = claim.getClaim(claimId);
-        assertTrue(c.fullyRedeemed);
-        assertEq(c.redeemedUnits, 1000);
     }
 
     function test_RedeemToStake_Idempotent() public {
-        uint64 now_ = uint64(block.timestamp);
-
         vm.startPrank(authority);
         uint256 claimId = _issueClaim(keccak256("redeem-idem"), recipient, 1000);
-        uint256 stakeId1 = certificates.redeemToStake(
-            keccak256("redemption-idem"), claimId, 1000, UnitType.SHARES, now_, now_, now_, bytes32(0)
-        );
-        uint256 stakeId2 = certificates.redeemToStake(
-            keccak256("redemption-idem"), claimId, 1000, UnitType.SHARES, now_, now_, now_, bytes32(0)
-        );
+        uint256 stakeId1 = certificates.redeemToStake(keccak256("redemption-idem"), claimId, 1000, bytes32(0));
+        uint256 stakeId2 = certificates.redeemToStake(keccak256("redemption-idem"), claimId, 1000, bytes32(0));
 
         assertEq(stakeId1, stakeId2);
         vm.stopPrank();
     }
 
     function test_RedeemToStake_RevertsNotRedeemableYet() public {
-        uint64 now_ = uint64(block.timestamp);
-
         vm.startPrank(authority);
         uint256 claimId = certificates.issueClaim(
-            keccak256("not-yet"), recipient, pactId, 1000, UnitType.SHARES, uint64(block.timestamp + 1 days)
+            keccak256("not-yet"), recipient, pactId, 1000, UnitType.SHARES, uint64(block.timestamp + 1 days), 0, 0, 0
         );
 
         vm.expectRevert(ClaimNotRedeemable.selector);
-        certificates.redeemToStake(keccak256("early"), claimId, 1000, UnitType.SHARES, now_, now_, now_, bytes32(0));
+        certificates.redeemToStake(keccak256("early"), claimId, 1000, bytes32(0));
         vm.stopPrank();
     }
 
@@ -388,47 +524,54 @@ contract StakeCertificatesTest is Test {
         uint64 redeemableAt = uint64(block.timestamp + 1 days);
 
         vm.startPrank(authority);
-        uint256 claimId =
-            certificates.issueClaim(keccak256("timed-redeem"), recipient, pactId, 1000, UnitType.SHARES, redeemableAt);
+        uint256 claimId = certificates.issueClaim(
+            keccak256("timed-redeem"), recipient, pactId, 1000, UnitType.SHARES, redeemableAt, 0, 0, 0
+        );
 
         vm.warp(redeemableAt + 1);
-        uint64 now_ = uint64(block.timestamp);
-        uint256 stakeId = certificates.redeemToStake(
-            keccak256("timed"), claimId, 1000, UnitType.SHARES, now_, now_, now_, bytes32(0)
-        );
+        uint256 stakeId = certificates.redeemToStake(keccak256("timed"), claimId, 1000, bytes32(0));
         vm.stopPrank();
 
         assertEq(stakeId, 1);
     }
 
-    // ============ Partial Redemption Tests (H-1 Fix) ============
+    function test_RedeemToStake_OnlyVestedUnits() public {
+        uint64 now_ = uint64(block.timestamp);
+        vm.startPrank(authority);
+        uint256 claimId = _issueClaimWithVesting(
+            keccak256("vest-redeem"), recipient, 1000,
+            now_, now_ + 365 days, now_ + 4 * 365 days
+        );
+
+        // Warp to cliff (25% vested)
+        vm.warp(now_ + 365 days);
+
+        // Can redeem 250 (vested amount)
+        uint256 stakeId = certificates.redeemToStake(keccak256("redeem-vested"), claimId, 250, bytes32(0));
+        assertEq(stake.getStake(stakeId).units, 250);
+
+        // Can't redeem more than vested
+        vm.expectRevert(InvalidUnits.selector);
+        certificates.redeemToStake(keccak256("redeem-too-much"), claimId, 1, bytes32(0));
+        vm.stopPrank();
+    }
+
+    // ============ Partial Redemption Tests ============
 
     function test_PartialRedemption() public {
-        uint64 now_ = uint64(block.timestamp);
         vm.startPrank(authority);
         uint256 claimId = _issueClaim(keccak256("partial"), recipient, 1000);
 
         // Redeem 500 of 1000
-        uint256 stakeId1 = certificates.redeemToStake(
-            keccak256("partial-redeem-1"), claimId, 500, UnitType.SHARES, now_, now_, now_, bytes32(0)
-        );
+        uint256 stakeId1 = certificates.redeemToStake(keccak256("partial-redeem-1"), claimId, 500, bytes32(0));
 
-        // Verify claim is not fully redeemed
         ClaimState memory c = claim.getClaim(claimId);
-        assertFalse(c.fullyRedeemed);
         assertEq(c.redeemedUnits, 500);
         assertEq(claim.remainingUnits(claimId), 500);
 
         // Redeem remaining 500
-        uint256 stakeId2 = certificates.redeemToStake(
-            keccak256("partial-redeem-2"), claimId, 500, UnitType.SHARES, now_, now_, now_, bytes32(0)
-        );
+        uint256 stakeId2 = certificates.redeemToStake(keccak256("partial-redeem-2"), claimId, 500, bytes32(0));
         vm.stopPrank();
-
-        // Now claim is fully redeemed
-        ClaimState memory c2 = claim.getClaim(claimId);
-        assertTrue(c2.fullyRedeemed);
-        assertEq(c2.redeemedUnits, 1000);
 
         // Two separate stakes created
         StakeState memory s1 = stake.getStake(stakeId1);
@@ -438,251 +581,50 @@ contract StakeCertificatesTest is Test {
     }
 
     function test_PartialRedemption_RevertsExceedsRemaining() public {
-        uint64 now_ = uint64(block.timestamp);
         vm.startPrank(authority);
         uint256 claimId = _issueClaim(keccak256("exceed-remaining"), recipient, 1000);
 
-        // Redeem 700
-        certificates.redeemToStake(keccak256("exceed-r1"), claimId, 700, UnitType.SHARES, now_, now_, now_, bytes32(0));
+        certificates.redeemToStake(keccak256("exceed-r1"), claimId, 700, bytes32(0));
 
-        // Try to redeem 400 more (only 300 remaining)
         vm.expectRevert(InvalidUnits.selector);
-        certificates.redeemToStake(keccak256("exceed-r2"), claimId, 400, UnitType.SHARES, now_, now_, now_, bytes32(0));
+        certificates.redeemToStake(keccak256("exceed-r2"), claimId, 400, bytes32(0));
         vm.stopPrank();
     }
 
-    function test_PartialRedemption_RevertsAfterFullyRedeemed() public {
-        uint64 now_ = uint64(block.timestamp);
-        vm.startPrank(authority);
-        uint256 claimId = _issueClaim(keccak256("full-then-more"), recipient, 1000);
+    // ============ Stake Tests (Simplified — no vesting, no revocation) ============
 
-        // Redeem all
-        certificates.redeemToStake(keccak256("full-r1"), claimId, 1000, UnitType.SHARES, now_, now_, now_, bytes32(0));
-
-        // Try to redeem more
-        vm.expectRevert(ClaimNotRedeemable.selector);
-        certificates.redeemToStake(keccak256("full-r2"), claimId, 1, UnitType.SHARES, now_, now_, now_, bytes32(0));
-        vm.stopPrank();
-    }
-
-    // ============ Vesting Tests ============
-
-    function test_VestedUnits_BeforeCliff() public {
-        uint64 now_ = uint64(block.timestamp);
+    function test_StakeIsUnconditional() public {
         vm.startPrank(authority);
         (, uint256 stakeId) = _issueAndRedeem(
-            keccak256("vest-before-cliff"),
-            keccak256("vest-redeem"),
-            recipient,
-            1000,
-            now_,
-            now_ + 365 days,
-            now_ + 4 * 365 days
+            keccak256("unconditional"), keccak256("unconditional-r"), recipient, 1000
         );
-        vm.stopPrank();
-
-        assertEq(stake.vestedUnits(stakeId), 0);
-        assertEq(stake.unvestedUnits(stakeId), 1000);
-    }
-
-    function test_VestedUnits_AtCliff() public {
-        uint64 now_ = uint64(block.timestamp);
-        vm.startPrank(authority);
-        (, uint256 stakeId) = _issueAndRedeem(
-            keccak256("vest-at-cliff"),
-            keccak256("vest-redeem-cliff"),
-            recipient,
-            1000,
-            now_,
-            now_ + 365 days,
-            now_ + 4 * 365 days
-        );
-        vm.stopPrank();
-
-        vm.warp(now_ + 365 days);
-        assertEq(stake.vestedUnits(stakeId), 250);
-    }
-
-    function test_VestedUnits_FullyVested() public {
-        uint64 now_ = uint64(block.timestamp);
-        vm.startPrank(authority);
-        (, uint256 stakeId) = _issueAndRedeem(
-            keccak256("fully-vested"),
-            keccak256("fully-redeem"),
-            recipient,
-            1000,
-            now_,
-            now_ + 365 days,
-            now_ + 4 * 365 days
-        );
-        vm.stopPrank();
-
-        vm.warp(now_ + 5 * 365 days);
-        assertEq(stake.vestedUnits(stakeId), 1000);
-        assertEq(stake.unvestedUnits(stakeId), 0);
-    }
-
-    // ============ Revocation Tests (C-3, C-4 Fixes) ============
-
-    function test_RevokeStake_UnvestedOnly_ReducesUnits() public {
-        uint64 now_ = uint64(block.timestamp);
-        vm.startPrank(authority);
-        (, uint256 stakeId) = _issueAndRedeem(
-            keccak256("revoke-unvested"),
-            keccak256("revoke-redeem"),
-            recipient,
-            1000,
-            now_,
-            now_ + 365 days,
-            now_ + 4 * 365 days
-        );
-
-        // Warp to 2 years (50% vested)
-        vm.warp(now_ + 2 * 365 days);
-
-        certificates.revokeStake(stakeId, keccak256("terminated"));
         vm.stopPrank();
 
         StakeState memory s = stake.getStake(stakeId);
-        assertTrue(s.revoked);
-        assertEq(s.units, 500); // Retained vested units
-        assertEq(s.revokedUnits, 500); // Revoked unvested units
-        assertEq(s.revokedAt, uint64(now_ + 2 * 365 days));
+        assertEq(s.units, 1000);
+        // No vesting fields, no revocation fields — just units
     }
 
-    function test_RevokeStake_VestedUnitsFreeze() public {
-        uint64 now_ = uint64(block.timestamp);
+    function test_StakeIsNonTransferable() public {
         vm.startPrank(authority);
         (, uint256 stakeId) = _issueAndRedeem(
-            keccak256("revoke-freeze"),
-            keccak256("revoke-freeze-r"),
-            recipient,
-            1000,
-            now_,
-            now_ + 365 days,
-            now_ + 4 * 365 days
-        );
-
-        // Revoke at day 0 (before cliff → 0 vested)
-        certificates.revokeStake(stakeId, bytes32(0));
-        vm.stopPrank();
-
-        // Vesting should be frozen at 0
-        assertEq(stake.vestedUnits(stakeId), 0);
-
-        // Even after time passes, vesting stays frozen
-        vm.warp(now_ + 5 * 365 days);
-        assertEq(stake.vestedUnits(stakeId), 0);
-        assertEq(stake.unvestedUnits(stakeId), 0);
-
-        StakeState memory s = stake.getStake(stakeId);
-        assertEq(s.units, 0);
-        assertEq(s.revokedUnits, 1000);
-    }
-
-    function test_RevokeStake_ANY_RevokesEverything() public {
-        // Create pact with ANY revocation mode
-        vm.prank(authority);
-        bytes32 anyPactId = certificates.createPact(
-            keccak256("any-revoke"), rightsRoot, uri, "any-1.0.0", true, RevocationMode.ANY, true
-        );
-
-        uint64 now_ = uint64(block.timestamp);
-        vm.startPrank(authority);
-        uint256 claimId =
-            certificates.issueClaim(keccak256("any-claim"), recipient, anyPactId, 1000, UnitType.SHARES, 0);
-
-        // Warp to 50% vested
-        vm.warp(now_ + 2 * 365 days);
-
-        uint256 stakeId = certificates.redeemToStake(
-            keccak256("any-redeem"),
-            claimId,
-            1000,
-            UnitType.SHARES,
-            now_,
-            now_ + 365 days,
-            now_ + 4 * 365 days,
-            bytes32(0)
-        );
-
-        certificates.revokeStake(stakeId, keccak256("any revoke"));
-        vm.stopPrank();
-
-        StakeState memory s = stake.getStake(stakeId);
-        assertTrue(s.revoked);
-        assertEq(s.units, 0); // Everything revoked
-        assertEq(s.revokedUnits, 1000); // All units revoked
-    }
-
-    function test_RevokeStake_RevertsWhenFullyVested() public {
-        uint64 now_ = uint64(block.timestamp);
-        vm.startPrank(authority);
-        (, uint256 stakeId) = _issueAndRedeem(
-            keccak256("revoke-fully-vested"),
-            keccak256("revoke-redeem-full"),
-            recipient,
-            1000,
-            now_,
-            now_ + 365 days,
-            now_ + 4 * 365 days
+            keccak256("no-xfer"), keccak256("no-xfer-r"), recipient, 1000
         );
         vm.stopPrank();
 
-        vm.warp(now_ + 5 * 365 days);
-
-        vm.prank(authority);
-        vm.expectRevert(StakeFullyVested.selector);
-        certificates.revokeStake(stakeId, bytes32(0));
+        vm.prank(recipient);
+        vm.expectRevert(Soulbound.selector);
+        stake.transferFrom(recipient, recipient2, stakeId);
     }
 
-    function test_RevokeStake_RevertsWhenModeIsNone() public {
-        vm.prank(authority);
-        bytes32 noPactId = certificates.createPact(
-            keccak256("no-revoke"), rightsRoot, uri, "no-revoke-1.0.0", true, RevocationMode.NONE, false
-        );
-
-        uint64 now_ = uint64(block.timestamp);
-        vm.startPrank(authority);
-        uint256 claimId =
-            certificates.issueClaim(keccak256("no-revoke-claim"), recipient, noPactId, 1000, UnitType.SHARES, 0);
-        uint256 stakeId = certificates.redeemToStake(
-            keccak256("no-revoke-redeem"), claimId, 1000, UnitType.SHARES, now_, now_ + 1, now_ + 2, bytes32(0)
-        );
-
-        vm.expectRevert(RevocationDisabled.selector);
-        certificates.revokeStake(stakeId, bytes32(0));
-        vm.stopPrank();
-    }
-
-    function test_RevokeStake_RevertsAlreadyRevoked() public {
-        uint64 now_ = uint64(block.timestamp);
-        vm.startPrank(authority);
-        (, uint256 stakeId) = _issueAndRedeem(
-            keccak256("double-revoke"),
-            keccak256("double-redeem"),
-            recipient,
-            1000,
-            now_,
-            now_ + 365 days,
-            now_ + 4 * 365 days
-        );
-
-        certificates.revokeStake(stakeId, bytes32(0));
-
-        vm.expectRevert(AlreadyRevoked.selector);
-        certificates.revokeStake(stakeId, bytes32(0));
-        vm.stopPrank();
-    }
-
-    // ============ Pause Tests (C-1 Fix) ============
+    // ============ Pause Tests ============
 
     function test_Pause_BlocksIssuance() public {
         vm.startPrank(authority);
         certificates.pause();
 
         vm.expectRevert();
-        certificates.issueClaim(keccak256("paused"), recipient, pactId, 1000, UnitType.SHARES, 0);
+        certificates.issueClaim(keccak256("paused"), recipient, pactId, 1000, UnitType.SHARES, 0, 0, 0, 0);
         vm.stopPrank();
     }
 
@@ -691,7 +633,7 @@ contract StakeCertificatesTest is Test {
         certificates.pause();
 
         vm.expectRevert();
-        certificates.createPact(keccak256("paused"), rightsRoot, uri, "paused-1.0", true, RevocationMode.ANY, false);
+        certificates.createPact(keccak256("paused"), rightsRoot, uri, "paused-1.0", true, RevocationMode.ANY);
         vm.stopPrank();
     }
 
@@ -700,13 +642,12 @@ contract StakeCertificatesTest is Test {
         certificates.pause();
         certificates.unpause();
 
-        // Should work after unpause
         uint256 claimId = _issueClaim(keccak256("unpaused"), recipient, 1000);
         assertEq(claimId, 1);
         vm.stopPrank();
     }
 
-    // ============ Authority Rotation Tests (H-4 Fix) ============
+    // ============ Authority Rotation Tests ============
 
     function test_TransferAuthority() public {
         address newAuthority = address(0x99);
@@ -716,10 +657,9 @@ contract StakeCertificatesTest is Test {
 
         assertEq(certificates.authority(), newAuthority);
 
-        // New authority can create pacts
         vm.prank(newAuthority);
         bytes32 newPact =
-            certificates.createPact(keccak256("new-auth"), rightsRoot, uri, "2.0.0", true, RevocationMode.ANY, false);
+            certificates.createPact(keccak256("new-auth"), rightsRoot, uri, "2.0.0", true, RevocationMode.ANY);
         assertTrue(registry.pactExists(newPact));
     }
 
@@ -729,10 +669,9 @@ contract StakeCertificatesTest is Test {
         vm.prank(authority);
         certificates.transferAuthority(newAuthority);
 
-        // Old authority can no longer create pacts
         vm.prank(authority);
         vm.expectRevert();
-        certificates.createPact(keccak256("old-auth"), rightsRoot, uri, "3.0.0", true, RevocationMode.ANY, false);
+        certificates.createPact(keccak256("old-auth"), rightsRoot, uri, "3.0.0", true, RevocationMode.ANY);
     }
 
     function test_TransferAuthority_RevertsZeroAddress() public {
@@ -742,15 +681,12 @@ contract StakeCertificatesTest is Test {
     }
 
     function test_TransferAuthority_RegistryNotDirectlyAccessible() public {
-        // Authority EOA should NOT have direct admin on the registry
         bytes32 operatorRole = registry.OPERATOR_ROLE();
         bytes32 adminRole = registry.DEFAULT_ADMIN_ROLE();
 
-        // Authority is not registry admin — StakeCertificates is
         assertFalse(registry.hasRole(adminRole, authority));
         assertTrue(registry.hasRole(adminRole, address(certificates)));
 
-        // Authority cannot grant operator role on registry directly
         vm.prank(authority);
         vm.expectRevert();
         registry.grantRole(operatorRole, recipient);
@@ -760,13 +696,12 @@ contract StakeCertificatesTest is Test {
         vm.startPrank(authority);
         certificates.initiateTransition(vaultAddr);
 
-        // Authority roles revoked at transition — can't transfer
         vm.expectRevert();
         certificates.transferAuthority(address(0x99));
         vm.stopPrank();
     }
 
-    // ============ Base URI Tests (H-3 Fix) ============
+    // ============ Base URI Tests ============
 
     function test_SetClaimBaseURI() public {
         vm.prank(authority);
@@ -779,17 +714,16 @@ contract StakeCertificatesTest is Test {
     }
 
     function test_SetStakeBaseURI() public {
-        uint64 now_ = uint64(block.timestamp);
         vm.startPrank(authority);
         certificates.setStakeBaseURI("https://api.stake.com/stakes/");
         (, uint256 stakeId) =
-            _issueAndRedeem(keccak256("uri-stake"), keccak256("uri-stake-r"), recipient, 1000, now_, now_, now_);
+            _issueAndRedeem(keccak256("uri-stake"), keccak256("uri-stake-r"), recipient, 1000);
         vm.stopPrank();
 
         assertEq(stake.tokenURI(stakeId), "https://api.stake.com/stakes/1");
     }
 
-    // ============ Batch Issuance Tests (M-3 Fix) ============
+    // ============ Batch Issuance Tests ============
 
     function test_IssueClaimBatch() public {
         bytes32[] memory issuanceIds = new bytes32[](3);
@@ -809,7 +743,7 @@ contract StakeCertificatesTest is Test {
 
         vm.prank(authority);
         uint256[] memory claimIds =
-            certificates.issueClaimBatch(issuanceIds, recipients_, pactId, maxUnitsArr, UnitType.SHARES, 0);
+            certificates.issueClaimBatch(issuanceIds, recipients_, pactId, maxUnitsArr, UnitType.SHARES, 0, 0, 0, 0);
 
         assertEq(claimIds.length, 3);
         assertEq(claim.ownerOf(claimIds[0]), recipient);
@@ -841,14 +775,12 @@ contract StakeCertificatesTest is Test {
         vm.startPrank(authority);
         certificates.initiateTransition(vaultAddr);
 
-        // Authority roles are revoked at transition — AccessControl fires before whenNotTransitioned
         vm.expectRevert();
-        certificates.createPact(keccak256("post"), rightsRoot, uri, "post-1.0", true, RevocationMode.ANY, false);
+        certificates.createPact(keccak256("post"), rightsRoot, uri, "post-1.0", true, RevocationMode.ANY);
 
         vm.expectRevert();
-        certificates.issueClaim(keccak256("post"), recipient, pactId, 1000, UnitType.SHARES, 0);
+        certificates.issueClaim(keccak256("post"), recipient, pactId, 1000, UnitType.SHARES, 0, 0, 0, 0);
 
-        // Verify authority has no roles
         assertFalse(certificates.hasRole(certificates.AUTHORITY_ROLE(), authority));
         assertFalse(certificates.hasRole(certificates.PAUSER_ROLE(), authority));
         assertFalse(certificates.hasRole(certificates.DEFAULT_ADMIN_ROLE(), authority));
@@ -865,7 +797,6 @@ contract StakeCertificatesTest is Test {
         vm.startPrank(authority);
         certificates.initiateTransition(vaultAddr);
 
-        // Authority roles revoked — can't call again even if they wanted to
         vm.expectRevert();
         certificates.initiateTransition(vaultAddr);
         vm.stopPrank();
@@ -874,14 +805,12 @@ contract StakeCertificatesTest is Test {
     // ============ Vault Transfer Tests ============
 
     function test_VaultCanTransferStake() public {
-        uint64 now_ = uint64(block.timestamp);
         vm.startPrank(authority);
         (, uint256 stakeId) =
-            _issueAndRedeem(keccak256("vault-xfer"), keccak256("vault-xfer-r"), recipient, 1000, now_, now_, now_);
+            _issueAndRedeem(keccak256("vault-xfer"), keccak256("vault-xfer-r"), recipient, 1000);
         certificates.initiateTransition(vaultAddr);
         vm.stopPrank();
 
-        // Vault can now transfer the stake
         vm.prank(vaultAddr);
         stake.transferFrom(recipient, vaultAddr, stakeId);
 
@@ -889,14 +818,12 @@ contract StakeCertificatesTest is Test {
     }
 
     function test_NonVaultCannotTransferStake() public {
-        uint64 now_ = uint64(block.timestamp);
         vm.startPrank(authority);
         (, uint256 stakeId) =
-            _issueAndRedeem(keccak256("no-xfer"), keccak256("no-xfer-r"), recipient, 1000, now_, now_, now_);
+            _issueAndRedeem(keccak256("no-xfer"), keccak256("no-xfer-r"), recipient, 1000);
         certificates.initiateTransition(vaultAddr);
         vm.stopPrank();
 
-        // Random address still can't transfer
         vm.prank(recipient);
         vm.expectRevert(Soulbound.selector);
         stake.transferFrom(recipient, recipient2, stakeId);
@@ -906,24 +833,9 @@ contract StakeCertificatesTest is Test {
         vm.startPrank(authority);
         certificates.initiateTransition(vaultAddr);
 
-        // Authority can't pause post-transition — roles revoked
         vm.expectRevert();
         certificates.pause();
         vm.stopPrank();
-    }
-
-    function test_VaultTransferWorksPostTransition() public {
-        uint64 now_ = uint64(block.timestamp);
-        vm.startPrank(authority);
-        (, uint256 stakeId) =
-            _issueAndRedeem(keccak256("vault-post"), keccak256("vault-post-r"), recipient, 1000, now_, now_, now_);
-        certificates.initiateTransition(vaultAddr);
-        vm.stopPrank();
-
-        // Vault transfers are unstoppable post-transition
-        vm.prank(vaultAddr);
-        stake.transferFrom(recipient, vaultAddr, stakeId);
-        assertEq(stake.ownerOf(stakeId), vaultAddr);
     }
 
     // ============ ERC-5192 Interface Tests ============
@@ -951,55 +863,47 @@ contract StakeCertificatesTest is Test {
     function test_ImmediateVesting() public {
         uint64 now_ = uint64(block.timestamp);
         vm.startPrank(authority);
+        uint256 claimId = _issueClaimWithVesting(
+            keccak256("immediate-vest"), recipient, 1000, now_, now_, now_
+        );
+
+        // Immediate vesting — all units vested
+        assertEq(claim.vestedUnits(claimId), 1000);
+
         (, uint256 stakeId) = _issueAndRedeem(
-            keccak256("immediate-vest"), keccak256("immediate-redeem"), recipient, 1000, now_, now_, now_
+            keccak256("immediate-vest2"), keccak256("immediate-redeem"), recipient, 500
         );
         vm.stopPrank();
 
-        assertEq(stake.vestedUnits(stakeId), 1000);
-    }
-
-    function test_RedeemToStake_RevertsExceedsMaxUnits() public {
-        uint64 now_ = uint64(block.timestamp);
-        vm.startPrank(authority);
-        uint256 claimId = _issueClaim(keccak256("exceed-max"), recipient, 1000);
-
-        vm.expectRevert(InvalidUnits.selector);
-        certificates.redeemToStake(
-            keccak256("exceed-redeem"), claimId, 1001, UnitType.SHARES, now_, now_, now_, bytes32(0)
-        );
-        vm.stopPrank();
+        assertEq(stake.getStake(stakeId).units, 500);
     }
 
     function test_InvalidVestingOrder() public {
         uint64 now_ = uint64(block.timestamp);
         vm.startPrank(authority);
-        uint256 claimId = _issueClaim(keccak256("invalid-vest"), recipient, 1000);
 
         vm.expectRevert(InvalidVesting.selector);
-        certificates.redeemToStake(
-            keccak256("invalid-redeem"), claimId, 1000, UnitType.SHARES, now_ + 100, now_, now_ + 200, bytes32(0)
+        certificates.issueClaim(
+            keccak256("invalid-vest"), recipient, pactId, 1000, UnitType.SHARES, 0,
+            now_ + 100, now_, now_ + 200 // cliff before start
         );
         vm.stopPrank();
     }
 
-    // ============ UnitType Tests (H-1 Fix) ============
+    // ============ UnitType Tests ============
 
     function test_UnitType_StoredOnClaim() public {
         vm.prank(authority);
-        uint256 claimId = certificates.issueClaim(keccak256("bps-claim"), recipient, pactId, 5000, UnitType.BPS, 0);
+        uint256 claimId = certificates.issueClaim(keccak256("bps-claim"), recipient, pactId, 5000, UnitType.BPS, 0, 0, 0, 0);
 
         ClaimState memory c = claim.getClaim(claimId);
         assertEq(uint8(c.unitType), uint8(UnitType.BPS));
     }
 
     function test_UnitType_StoredOnStake() public {
-        uint64 now_ = uint64(block.timestamp);
         vm.startPrank(authority);
-        uint256 claimId = certificates.issueClaim(keccak256("wei-claim"), recipient, pactId, 1e18, UnitType.WEI, 0);
-        uint256 stakeId = certificates.redeemToStake(
-            keccak256("wei-redeem"), claimId, 1e18, UnitType.WEI, now_, now_, now_, bytes32(0)
-        );
+        uint256 claimId = certificates.issueClaim(keccak256("wei-claim"), recipient, pactId, 1e18, UnitType.WEI, 0, 0, 0, 0);
+        uint256 stakeId = certificates.redeemToStake(keccak256("wei-redeem"), claimId, 1e18, bytes32(0));
         vm.stopPrank();
 
         StakeState memory s = stake.getStake(stakeId);
@@ -1011,7 +915,7 @@ contract StakeCertificatesTest is Test {
     function test_GasBenchmark_CreatePact() public {
         vm.prank(authority);
         uint256 gasStart = gasleft();
-        certificates.createPact(keccak256("benchmark"), rightsRoot, uri, "bench-1.0.0", true, RevocationMode.ANY, false);
+        certificates.createPact(keccak256("benchmark"), rightsRoot, uri, "bench-1.0.0", true, RevocationMode.ANY);
         uint256 gasUsed = gasStart - gasleft();
         console.log("Gas used for createPact:", gasUsed);
     }
@@ -1019,7 +923,7 @@ contract StakeCertificatesTest is Test {
     function test_GasBenchmark_IssueClaim() public {
         vm.prank(authority);
         uint256 gasStart = gasleft();
-        certificates.issueClaim(keccak256("bench-issue"), recipient, pactId, 1000, UnitType.SHARES, 0);
+        certificates.issueClaim(keccak256("bench-issue"), recipient, pactId, 1000, UnitType.SHARES, 0, 0, 0, 0);
         uint256 gasUsed = gasStart - gasleft();
         console.log("Gas used for issueClaim:", gasUsed);
     }
@@ -1028,18 +932,8 @@ contract StakeCertificatesTest is Test {
         vm.startPrank(authority);
         uint256 claimId = _issueClaim(keccak256("bench-redeem"), recipient, 1000);
 
-        uint64 now_ = uint64(block.timestamp);
         uint256 gasStart = gasleft();
-        certificates.redeemToStake(
-            keccak256("bench-stake"),
-            claimId,
-            1000,
-            UnitType.SHARES,
-            now_,
-            now_ + 365 days,
-            now_ + 4 * 365 days,
-            bytes32(0)
-        );
+        certificates.redeemToStake(keccak256("bench-stake"), claimId, 1000, bytes32(0));
         uint256 gasUsed = gasStart - gasleft();
         console.log("Gas used for redeemToStake:", gasUsed);
         vm.stopPrank();

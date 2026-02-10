@@ -33,12 +33,13 @@ error InvalidVesting();
 error InvalidRecipient();
 error InvalidUnits();
 error IdempotenceMismatch();
-error StakeFullyVested();
+error ClaimFullyVested();
 error AlreadyTransitioned();
 error VaultAlreadySet();
 error InvalidVault();
 error InvalidAuthority();
 error ArrayLengthMismatch();
+error NothingToRedeem();
 
 // ============ Enums ============
 
@@ -68,14 +69,16 @@ struct Pact {
     string pactVersion;
     bool mutablePact;
     RevocationMode revocationMode;
-    bool defaultRevocableUnvested;
 }
 
 struct ClaimState {
     bool voided;
-    bool fullyRedeemed;
     uint64 issuedAt;
     uint64 redeemableAt;
+    uint64 vestStart;
+    uint64 vestCliff;
+    uint64 vestEnd;
+    uint64 revokedAt;
     UnitType unitType;
     uint256 maxUnits;
     uint256 redeemedUnits;
@@ -83,16 +86,9 @@ struct ClaimState {
 }
 
 struct StakeState {
-    bool revoked;
     uint64 issuedAt;
-    uint64 vestStart;
-    uint64 vestCliff;
-    uint64 vestEnd;
-    uint64 revokedAt;
-    bool revocableUnvested;
     UnitType unitType;
     uint256 units;
-    uint256 revokedUnits;
     bytes32 reasonHash;
 }
 
@@ -299,8 +295,7 @@ contract StakePactRegistry is AccessControl {
         string calldata uri,
         string calldata pactVersion,
         bool mutablePact,
-        RevocationMode revocationMode,
-        bool defaultRevocableUnvested
+        RevocationMode revocationMode
     )
         external
         onlyRole(OPERATOR_ROLE)
@@ -320,8 +315,7 @@ contract StakePactRegistry is AccessControl {
             uri: uri,
             pactVersion: pactVersion,
             mutablePact: mutablePact,
-            revocationMode: revocationMode,
-            defaultRevocableUnvested: defaultRevocableUnvested
+            revocationMode: revocationMode
         });
 
         emit PactCreated(pactId, issuerId, contentHash, uri, pactVersion);
@@ -360,8 +354,7 @@ contract StakePactRegistry is AccessControl {
             uri: newUri,
             pactVersion: newPactVersion,
             mutablePact: oldP.mutablePact,
-            revocationMode: oldP.revocationMode,
-            defaultRevocableUnvested: oldP.defaultRevocableUnvested
+            revocationMode: oldP.revocationMode
         });
 
         emit PactAmended(oldPactId, newPactId);
@@ -373,7 +366,10 @@ contract StakePactRegistry is AccessControl {
 
 /**
  * @title SoulboundClaim
- * @notice Non-transferable claim certificates
+ * @notice Non-transferable claim certificates with optional vesting.
+ *         Claims are the universal issuance envelope — SAFEs, stock options,
+ *         warrants, RSUs, and advisor grants all collapse into a single primitive.
+ *         Vesting and revocation happen at the Claim level.
  */
 contract SoulboundClaim is SoulboundERC721 {
     StakePactRegistry public immutable REGISTRY;
@@ -389,10 +385,14 @@ contract SoulboundClaim is SoulboundERC721 {
         address indexed to,
         uint256 maxUnits,
         UnitType unitType,
-        uint64 redeemableAt
+        uint64 redeemableAt,
+        uint64 vestStart,
+        uint64 vestCliff,
+        uint64 vestEnd
     );
     event ClaimVoided(uint256 indexed claimId, bytes32 reasonHash);
-    event ClaimRedeemed(uint256 indexed claimId, bytes32 reasonHash);
+    event ClaimRevoked(uint256 indexed claimId, uint256 vestedAtRevocation, bytes32 reasonHash);
+    event ClaimRedeemed(uint256 indexed claimId, uint256 units, bytes32 reasonHash);
 
     constructor(
         address issuer_,
@@ -413,14 +413,20 @@ contract SoulboundClaim is SoulboundERC721 {
     }
 
     /**
-     * @notice Issue a new claim
+     * @notice Issue a new claim with optional vesting schedule.
+     *         For SAFEs/conversions: set vestStart=vestCliff=vestEnd=0 (no vesting, use redeemableAt).
+     *         For options/RSUs: set vesting schedule (vestStart, vestCliff, vestEnd).
+     *         Both gates can coexist — units must be vested AND past redeemableAt to redeem.
      */
     function issueClaim(
         address to,
         bytes32 pactId,
         uint256 maxUnits,
         UnitType unitType,
-        uint64 redeemableAt
+        uint64 redeemableAt,
+        uint64 vestStart,
+        uint64 vestCliff,
+        uint64 vestEnd
     )
         external
         onlyRole(ISSUER_ROLE)
@@ -429,6 +435,10 @@ contract SoulboundClaim is SoulboundERC721 {
     {
         if (to == address(0)) revert InvalidRecipient();
         if (maxUnits == 0) revert InvalidUnits();
+        // Vesting params: either all zero (no vesting) or valid order
+        if (vestEnd != 0) {
+            if (!(vestStart <= vestCliff && vestCliff <= vestEnd)) revert InvalidVesting();
+        }
 
         // Verify pact exists (getPact reverts if not found)
         REGISTRY.getPact(pactId);
@@ -437,9 +447,12 @@ contract SoulboundClaim is SoulboundERC721 {
         claimPact[id] = pactId;
         _claims[id] = ClaimState({
             voided: false,
-            fullyRedeemed: false,
             issuedAt: uint64(block.timestamp),
             redeemableAt: redeemableAt,
+            vestStart: vestStart,
+            vestCliff: vestCliff,
+            vestEnd: vestEnd,
+            revokedAt: 0,
             unitType: unitType,
             maxUnits: maxUnits,
             redeemedUnits: 0,
@@ -447,22 +460,52 @@ contract SoulboundClaim is SoulboundERC721 {
         });
 
         _mintSoulbound(to, id);
-        emit ClaimIssued(id, pactId, to, maxUnits, unitType, redeemableAt);
+        emit ClaimIssued(id, pactId, to, maxUnits, unitType, redeemableAt, vestStart, vestCliff, vestEnd);
         return id;
     }
 
     /**
-     * @notice Void a claim
+     * @notice Calculate vested units for a claim.
+     *         If no vesting is set (vestEnd == 0), all units are considered vested.
+     *         If revoked, vesting is frozen at the revocation timestamp.
+     */
+    function vestedUnits(uint256 claimId) public view returns (uint256) {
+        if (_ownerOf(claimId) == address(0)) revert ClaimNotFound();
+        ClaimState storage c = _claims[claimId];
+        return _calculateVestedUnits(c);
+    }
+
+    /**
+     * @notice Calculate unvested units for a claim.
+     */
+    function unvestedUnits(uint256 claimId) public view returns (uint256) {
+        if (_ownerOf(claimId) == address(0)) revert ClaimNotFound();
+        ClaimState storage c = _claims[claimId];
+        return c.maxUnits - _calculateVestedUnits(c);
+    }
+
+    /**
+     * @notice Calculate redeemable units (vested minus already redeemed).
+     */
+    function redeemableUnits(uint256 claimId) public view returns (uint256) {
+        if (_ownerOf(claimId) == address(0)) revert ClaimNotFound();
+        ClaimState storage c = _claims[claimId];
+        if (c.voided) return 0;
+        uint256 vested = _calculateVestedUnits(c);
+        if (vested <= c.redeemedUnits) return 0;
+        return vested - c.redeemedUnits;
+    }
+
+    /**
+     * @notice Void a claim. Authority can always void an unredeemed claim regardless
+     *         of revocationMode — this is the safety valve for mistakes.
      */
     function voidClaim(uint256 claimId, bytes32 reasonHash) external onlyRole(ISSUER_ROLE) whenNotPaused {
         if (_ownerOf(claimId) == address(0)) revert ClaimNotFound();
 
         ClaimState storage c = _claims[claimId];
         if (c.voided) revert AlreadyVoided();
-        if (c.fullyRedeemed) revert ClaimNotRedeemable();
-
-        // Voiding is distinct from revocation — authority can always void an unredeemed claim
-        // regardless of pact revocationMode. Revocation (on stakes) is what revocationMode controls.
+        if (c.redeemedUnits == c.maxUnits) revert ClaimNotRedeemable();
 
         c.voided = true;
         c.reasonHash = reasonHash;
@@ -470,8 +513,43 @@ contract SoulboundClaim is SoulboundERC721 {
     }
 
     /**
+     * @notice Revoke a claim's unvested units. Freezes vesting at the current timestamp.
+     *         Requires RevocationMode.UNVESTED_ONLY or ANY on the pact.
+     *         UNVESTED_ONLY: freezes vesting, vested units remain redeemable.
+     *         ANY: voids the claim entirely (even vested but unredeemed units are lost).
+     */
+    function revokeClaim(uint256 claimId, bytes32 reasonHash) external onlyRole(ISSUER_ROLE) whenNotPaused {
+        if (_ownerOf(claimId) == address(0)) revert ClaimNotFound();
+
+        ClaimState storage c = _claims[claimId];
+        if (c.voided) revert AlreadyVoided();
+        if (c.revokedAt != 0) revert AlreadyRevoked();
+
+        bytes32 pactId = claimPact[claimId];
+        Pact memory p = REGISTRY.getPact(pactId);
+
+        if (p.revocationMode == RevocationMode.NONE) revert RevocationDisabled();
+
+        if (p.revocationMode == RevocationMode.ANY) {
+            // ANY mode: void the claim entirely
+            c.voided = true;
+            c.reasonHash = reasonHash;
+            emit ClaimVoided(claimId, reasonHash);
+            return;
+        }
+
+        // UNVESTED_ONLY: freeze vesting at current timestamp
+        uint256 vested = _calculateVestedUnits(c);
+        if (vested >= c.maxUnits) revert ClaimFullyVested();
+
+        c.revokedAt = uint64(block.timestamp);
+        c.reasonHash = reasonHash;
+        emit ClaimRevoked(claimId, vested, reasonHash);
+    }
+
+    /**
      * @notice Record a redemption against a claim (called by StakeCertificates).
-     *         Supports partial redemptions — only marks fully redeemed when all units consumed.
+     *         Only redeems vested units.
      */
     function recordRedemption(
         uint256 claimId,
@@ -486,15 +564,15 @@ contract SoulboundClaim is SoulboundERC721 {
 
         ClaimState storage c = _claims[claimId];
         if (c.voided) revert AlreadyVoided();
-        if (c.fullyRedeemed) revert ClaimNotRedeemable();
-        if (c.redeemedUnits + units > c.maxUnits) revert InvalidUnits();
+
+        uint256 vested = _calculateVestedUnits(c);
+        uint256 available = vested - c.redeemedUnits;
+        if (units == 0 || units > available) revert InvalidUnits();
 
         c.redeemedUnits += units;
         c.reasonHash = reasonHash;
 
-        if (c.redeemedUnits == c.maxUnits) c.fullyRedeemed = true;
-
-        emit ClaimRedeemed(claimId, reasonHash);
+        emit ClaimRedeemed(claimId, units, reasonHash);
     }
 
     /**
@@ -503,7 +581,10 @@ contract SoulboundClaim is SoulboundERC721 {
     function remainingUnits(uint256 claimId) external view returns (uint256) {
         if (_ownerOf(claimId) == address(0)) revert ClaimNotFound();
         ClaimState storage c = _claims[claimId];
-        return c.maxUnits - c.redeemedUnits;
+        if (c.voided) return 0;
+        uint256 vested = _calculateVestedUnits(c);
+        if (vested <= c.redeemedUnits) return 0;
+        return vested - c.redeemedUnits;
     }
 
     /**
@@ -512,13 +593,37 @@ contract SoulboundClaim is SoulboundERC721 {
     function exists(uint256 claimId) external view returns (bool) {
         return _ownerOf(claimId) != address(0);
     }
+
+    /**
+     * @dev Internal vesting calculation.
+     *      If vestEnd == 0, all units are vested (no vesting schedule).
+     *      If revokedAt > 0, vesting is frozen at that timestamp.
+     */
+    function _calculateVestedUnits(ClaimState storage c) internal view returns (uint256) {
+        // No vesting schedule — all units vested immediately
+        if (c.vestEnd == 0) return c.maxUnits;
+
+        // Use revocation timestamp if claim was revoked (freeze vesting)
+        uint256 timestamp = c.revokedAt != 0 ? c.revokedAt : block.timestamp;
+
+        if (timestamp < c.vestCliff) return 0;
+        if (timestamp >= c.vestEnd) return c.maxUnits;
+
+        // Linear vesting between vestStart and vestEnd
+        uint256 elapsed = timestamp - c.vestStart;
+        uint256 duration = c.vestEnd - c.vestStart;
+        if (duration == 0) return c.maxUnits;
+
+        return (c.maxUnits * elapsed) / duration;
+    }
 }
 
 // ============ Stake Contract ============
 
 /**
  * @title SoulboundStake
- * @notice Non-transferable stake certificates with corrected revocation logic
+ * @notice Non-transferable stake certificates representing confirmed, unconditional ownership.
+ *         A Stake is a fact — no vesting, no revocation. Once minted, it is yours forever.
  */
 contract SoulboundStake is SoulboundERC721 {
     StakePactRegistry public immutable REGISTRY;
@@ -531,7 +636,6 @@ contract SoulboundStake is SoulboundERC721 {
     event StakeMinted(
         uint256 indexed stakeId, bytes32 indexed pactId, address indexed to, uint256 units, UnitType unitType
     );
-    event StakeRevoked(uint256 indexed stakeId, uint256 revokedUnits, uint256 retainedUnits, bytes32 reasonHash);
 
     constructor(
         address issuer_,
@@ -552,56 +656,13 @@ contract SoulboundStake is SoulboundERC721 {
     }
 
     /**
-     * @notice Calculate vested units for a stake.
-     *         For revoked stakes, returns the snapshot at revocation time.
-     */
-    function vestedUnits(uint256 stakeId) public view returns (uint256) {
-        if (_ownerOf(stakeId) == address(0)) revert StakeNotFound();
-
-        StakeState storage s = _stakes[stakeId];
-
-        // Revoked stakes return the retained units (already set to vested amount at revocation)
-        if (s.revoked) return s.units;
-
-        if (block.timestamp < s.vestCliff) return 0;
-        if (block.timestamp >= s.vestEnd) return s.units;
-
-        // Linear vesting between vestStart and vestEnd
-        uint256 elapsed = block.timestamp - s.vestStart;
-        uint256 duration = s.vestEnd - s.vestStart;
-
-        if (duration == 0) return s.units;
-
-        return (s.units * elapsed) / duration;
-    }
-
-    /**
-     * @notice Calculate unvested units for a stake.
-     *         For revoked stakes, returns 0 (unvested portion was removed).
-     */
-    function unvestedUnits(uint256 stakeId) public view returns (uint256) {
-        if (_ownerOf(stakeId) == address(0)) revert StakeNotFound();
-
-        StakeState storage s = _stakes[stakeId];
-
-        // Revoked stakes have no unvested portion
-        if (s.revoked) return 0;
-
-        return s.units - vestedUnits(stakeId);
-    }
-
-    /**
-     * @notice Mint a new stake
+     * @notice Mint a new stake. Stakes are unconditional — no vesting, no revocation.
      */
     function mintStake(
         address to,
         bytes32 pactId,
         uint256 units,
-        UnitType unitType,
-        uint64 vestStart,
-        uint64 vestCliff,
-        uint64 vestEnd,
-        bool revocableUnvested
+        UnitType unitType
     )
         external
         onlyRole(ISSUER_ROLE)
@@ -610,7 +671,6 @@ contract SoulboundStake is SoulboundERC721 {
     {
         if (to == address(0)) revert InvalidRecipient();
         if (units == 0) revert InvalidUnits();
-        if (!(vestStart <= vestCliff && vestCliff <= vestEnd)) revert InvalidVesting();
 
         // Verify pact exists (getPact reverts if not found)
         REGISTRY.getPact(pactId);
@@ -618,75 +678,15 @@ contract SoulboundStake is SoulboundERC721 {
         uint256 id = nextId++;
         stakePact[id] = pactId;
         _stakes[id] = StakeState({
-            revoked: false,
             issuedAt: uint64(block.timestamp),
-            vestStart: vestStart,
-            vestCliff: vestCliff,
-            vestEnd: vestEnd,
-            revokedAt: 0,
-            revocableUnvested: revocableUnvested,
             unitType: unitType,
             units: units,
-            revokedUnits: 0,
             reasonHash: bytes32(0)
         });
 
         _mintSoulbound(to, id);
         emit StakeMinted(id, pactId, to, units, unitType);
         return id;
-    }
-
-    /**
-     * @notice Revoke a stake.
-     *         UNVESTED_ONLY: snapshots vested amount, reduces units to vested, records revoked.
-     *         ANY: revokes the full stake (vested and unvested), sets units to 0.
-     */
-    function revokeStake(uint256 stakeId, bytes32 reasonHash) external onlyRole(ISSUER_ROLE) whenNotPaused {
-        if (_ownerOf(stakeId) == address(0)) revert StakeNotFound();
-
-        StakeState storage s = _stakes[stakeId];
-        if (s.revoked) revert AlreadyRevoked();
-
-        bytes32 pactId = stakePact[stakeId];
-        Pact memory p = REGISTRY.getPact(pactId);
-
-        if (p.revocationMode == RevocationMode.NONE) revert RevocationDisabled();
-
-        if (p.revocationMode == RevocationMode.UNVESTED_ONLY) {
-            if (!s.revocableUnvested) revert RevocationDisabled();
-
-            // Calculate vested units at this moment
-            uint256 vested = _calculateVestedUnits(s);
-            if (vested >= s.units) revert StakeFullyVested();
-
-            // Snapshot: retain vested, revoke unvested
-            uint256 unvested = s.units - vested;
-            s.revokedUnits = unvested;
-            s.units = vested;
-        } else {
-            // RevocationMode.ANY: revoke everything
-            s.revokedUnits = s.units;
-            s.units = 0;
-        }
-
-        s.revoked = true;
-        s.revokedAt = uint64(block.timestamp);
-        s.reasonHash = reasonHash;
-        emit StakeRevoked(stakeId, s.revokedUnits, s.units, reasonHash);
-    }
-
-    /**
-     * @dev Internal vesting calculation (does not check revoked status)
-     */
-    function _calculateVestedUnits(StakeState storage s) internal view returns (uint256) {
-        if (block.timestamp < s.vestCliff) return 0;
-        if (block.timestamp >= s.vestEnd) return s.units;
-
-        uint256 elapsed = block.timestamp - s.vestStart;
-        uint256 duration = s.vestEnd - s.vestStart;
-        if (duration == 0) return s.units;
-
-        return (s.units * elapsed) / duration;
     }
 
     /**
@@ -704,6 +704,8 @@ contract SoulboundStake is SoulboundERC721 {
  * @notice Main entry point for issuing and managing stake certificates.
  *         Pre-transition: issuer controls all operations.
  *         Post-transition: issuer powers freeze permanently.
+ *
+ *         Lifecycle: Pact → Claim (vests) → Stake (unconditional ownership) → Token (optional)
  */
 contract StakeCertificates is AccessControl, Pausable {
     bytes32 public constant AUTHORITY_ROLE = keccak256("AUTHORITY_ROLE");
@@ -842,8 +844,7 @@ contract StakeCertificates is AccessControl, Pausable {
         string calldata uri,
         string calldata pactVersion,
         bool mutablePact,
-        RevocationMode revocationMode,
-        bool defaultRevocableUnvested
+        RevocationMode revocationMode
     )
         external
         onlyRole(AUTHORITY_ROLE)
@@ -859,8 +860,7 @@ contract StakeCertificates is AccessControl, Pausable {
             uri,
             pactVersion,
             mutablePact,
-            revocationMode,
-            defaultRevocableUnvested
+            revocationMode
         );
     }
 
@@ -884,7 +884,7 @@ contract StakeCertificates is AccessControl, Pausable {
     }
 
     /**
-     * @notice Issue a claim with idempotence guarantee
+     * @notice Issue a claim with idempotence guarantee and optional vesting.
      */
     function issueClaim(
         bytes32 issuanceId,
@@ -892,7 +892,10 @@ contract StakeCertificates is AccessControl, Pausable {
         bytes32 pactId,
         uint256 maxUnits,
         UnitType unitType,
-        uint64 redeemableAt
+        uint64 redeemableAt,
+        uint64 vestStart,
+        uint64 vestCliff,
+        uint64 vestEnd
     )
         external
         onlyRole(AUTHORITY_ROLE)
@@ -900,7 +903,7 @@ contract StakeCertificates is AccessControl, Pausable {
         whenNotPaused
         returns (uint256)
     {
-        bytes32 paramsHash = keccak256(abi.encode(to, pactId, maxUnits, unitType, redeemableAt));
+        bytes32 paramsHash = keccak256(abi.encode(to, pactId, maxUnits, unitType, redeemableAt, vestStart, vestCliff, vestEnd));
 
         uint256 existing = claimIdByIssuanceId[issuanceId];
         if (existing != 0) {
@@ -908,7 +911,7 @@ contract StakeCertificates is AccessControl, Pausable {
             return existing;
         }
 
-        uint256 claimId = CLAIM.issueClaim(to, pactId, maxUnits, unitType, redeemableAt);
+        uint256 claimId = CLAIM.issueClaim(to, pactId, maxUnits, unitType, redeemableAt, vestStart, vestCliff, vestEnd);
         claimIdByIssuanceId[issuanceId] = claimId;
         claimParamsHashByIssuanceId[issuanceId] = paramsHash;
         return claimId;
@@ -923,7 +926,10 @@ contract StakeCertificates is AccessControl, Pausable {
         bytes32 pactId,
         uint256[] calldata maxUnitsArr,
         UnitType unitType,
-        uint64 redeemableAt
+        uint64 redeemableAt,
+        uint64 vestStart,
+        uint64 vestCliff,
+        uint64 vestEnd
     )
         external
         onlyRole(AUTHORITY_ROLE)
@@ -936,14 +942,14 @@ contract StakeCertificates is AccessControl, Pausable {
 
         uint256[] memory claimIds = new uint256[](len);
         for (uint256 i = 0; i < len; i++) {
-            bytes32 paramsHash = keccak256(abi.encode(recipients[i], pactId, maxUnitsArr[i], unitType, redeemableAt));
+            bytes32 paramsHash = keccak256(abi.encode(recipients[i], pactId, maxUnitsArr[i], unitType, redeemableAt, vestStart, vestCliff, vestEnd));
 
             uint256 existing = claimIdByIssuanceId[issuanceIds[i]];
             if (existing != 0) {
                 if (claimParamsHashByIssuanceId[issuanceIds[i]] != paramsHash) revert IdempotenceMismatch();
                 claimIds[i] = existing;
             } else {
-                uint256 claimId = CLAIM.issueClaim(recipients[i], pactId, maxUnitsArr[i], unitType, redeemableAt);
+                uint256 claimId = CLAIM.issueClaim(recipients[i], pactId, maxUnitsArr[i], unitType, redeemableAt, vestStart, vestCliff, vestEnd);
                 claimIdByIssuanceId[issuanceIds[i]] = claimId;
                 claimParamsHashByIssuanceId[issuanceIds[i]] = paramsHash;
                 claimIds[i] = claimId;
@@ -970,16 +976,30 @@ contract StakeCertificates is AccessControl, Pausable {
     }
 
     /**
-     * @notice Redeem a claim to a stake with idempotence guarantee
+     * @notice Revoke a claim by issuance ID. Freezes vesting (UNVESTED_ONLY) or voids (ANY).
+     */
+    function revokeClaim(
+        bytes32 issuanceId,
+        bytes32 reasonHash
+    )
+        external
+        onlyRole(AUTHORITY_ROLE)
+        whenNotTransitioned
+        whenNotPaused
+    {
+        uint256 claimId = claimIdByIssuanceId[issuanceId];
+        if (claimId == 0) revert ClaimNotFound();
+        CLAIM.revokeClaim(claimId, reasonHash);
+    }
+
+    /**
+     * @notice Redeem vested claim units to a stake. Stakes are unconditional ownership.
+     *         Vesting is validated on the Claim — only vested units can be redeemed.
      */
     function redeemToStake(
         bytes32 redemptionId,
         uint256 claimId,
         uint256 units,
-        UnitType unitType,
-        uint64 vestStart,
-        uint64 vestCliff,
-        uint64 vestEnd,
         bytes32 reasonHash
     )
         external
@@ -988,7 +1008,7 @@ contract StakeCertificates is AccessControl, Pausable {
         whenNotPaused
         returns (uint256)
     {
-        bytes32 paramsHash = keccak256(abi.encode(claimId, units, unitType, vestStart, vestCliff, vestEnd, reasonHash));
+        bytes32 paramsHash = keccak256(abi.encode(claimId, units, reasonHash));
 
         uint256 existing = stakeIdByRedemptionId[redemptionId];
         if (existing != 0) {
@@ -1000,41 +1020,24 @@ contract StakeCertificates is AccessControl, Pausable {
         if (!CLAIM.exists(claimId)) revert ClaimNotFound();
 
         ClaimState memory c = CLAIM.getClaim(claimId);
-        if (c.voided || c.fullyRedeemed) revert ClaimNotRedeemable();
+        if (c.voided) revert ClaimNotRedeemable();
         if (c.redeemableAt != 0 && block.timestamp < c.redeemableAt) revert ClaimNotRedeemable();
-        if (units == 0 || units > (c.maxUnits - c.redeemedUnits)) revert InvalidUnits();
-        if (unitType != c.unitType) revert InvalidUnits();
+        if (units == 0) revert InvalidUnits();
 
         bytes32 pactId = CLAIM.claimPact(claimId);
-        Pact memory p = REGISTRY.getPact(pactId);
-
         address to = CLAIM.ownerOf(claimId);
 
-        uint256 stakeId =
-            STAKE.mintStake(to, pactId, units, unitType, vestStart, vestCliff, vestEnd, p.defaultRevocableUnvested);
-
+        // Record redemption on claim (validates vesting internally)
         CLAIM.recordRedemption(claimId, units, reasonHash);
+
+        // Mint clean, unconditional stake
+        uint256 stakeId = STAKE.mintStake(to, pactId, units, c.unitType);
 
         stakeIdByRedemptionId[redemptionId] = stakeId;
         stakeParamsHashByRedemptionId[redemptionId] = paramsHash;
 
         emit Redeemed(redemptionId, claimId, stakeId);
         return stakeId;
-    }
-
-    /**
-     * @notice Revoke a stake. Pre-transition only.
-     */
-    function revokeStake(
-        uint256 stakeId,
-        bytes32 reasonHash
-    )
-        external
-        onlyRole(AUTHORITY_ROLE)
-        whenNotTransitioned
-        whenNotPaused
-    {
-        STAKE.revokeStake(stakeId, reasonHash);
     }
 
     /**
