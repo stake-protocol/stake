@@ -232,18 +232,21 @@ This is the opposite of a rug pull. The protocol's own fee tokens are time-locke
 
 ## 13. Authority Freeze at Transition
 
-**Decision**: When the authority calls `initiateTransition(vault)`, all authority powers are permanently frozen. No more Claims can be issued, no Pacts created, no revocations — nothing. The authority role ceases to function.
+**Decision**: When the authority calls `initiateTransition(vault)`, all authority powers over the certificate layer are permanently frozen. No more Claims can be issued, no Pacts created, no revocations — nothing. The authority role on StakeCertificates ceases to function. Equity issuance continues post-transition, but at the token layer under governance control (see Decision 22).
 
-**Rationale**: Transition is the moment the company goes from "private equity with a founder in charge" to "public tokens with governance." This is the onchain equivalent of an IPO, where the founder gives up unilateral control. Making the freeze permanent and irrevocable means stakeholders can trust that the rules won't change after they've transitioned their Stakes to tokens.
+**Rationale**: Transition is the moment the company graduates from "private soulbound certificates managed by a founder" to "public fungible tokens managed by governance." The certificate layer freezes because its job is done — every Pact, Claim, and Stake becomes an immutable historical record of how equity was issued, vested, and redeemed while the company was private.
 
-If the authority retained any powers post-transition, they could:
-- Issue new Claims that dilute token holders
-- Revoke Claims that were never redeemed
-- Amend Pacts retroactively
-All of these would undermine trust in the post-transition token.
+This is NOT the same as "the company can never issue equity again." Public companies issue equity constantly — RSUs to new hires, secondary offerings, stock splits. The difference is *where* and *how*: pre-transition, the founder issues certificates (Pact → Claim → Stake). Post-transition, governance mints tokens (authorized supply → governanceMint). The issuance mechanism changes; the capability doesn't disappear.
+
+If the certificate layer remained unfrozen post-transition, the authority could:
+- Issue new Claims that dilute token holders (bypassing governance)
+- Revoke Claims that were never redeemed (retroactive changes)
+- Amend Pacts (changing the terms that stakeholders relied on)
+All of these would undermine trust in the post-transition token. The freeze guarantees: once you transition, the pre-transition rules are locked in stone.
 
 **Counterpoints**:
-- "What if a bug is discovered post-transition?" — The contract is paused/unpausable pre-transition. Post-transition, bug fixes would require a new deployment and migration. This is the cost of immutability, and it's worth it.
+- "But public companies still have a CEO and board that issue equity." — Correct. Post-transition, the GOVERNANCE_ROLE on StakeToken controls new issuance. Governance can raise the authorized supply and mint new tokens. This is the equivalent of the board authorizing new share issuance. The founder doesn't lose the ability to propose new equity — they lose the ability to do it unilaterally.
+- "What if a bug is discovered post-transition?" — The certificate contracts are immutable post-transition. Bug fixes would require migration. This is the cost of immutability, and it's worth it — the alternative is a mutable equity layer, which is what we're trying to replace.
 - "What if there are unredeemed Claims?" — Holders can still redeem Claims to Stakes post-transition and deposit Stakes into the vault. The authority isn't needed for this — redemption uses existing Claims and follows existing vesting schedules.
 
 ---
@@ -410,3 +413,28 @@ Without burn, soulbound Stakes would accumulate forever — even after the compa
 - "Can someone be coerced into burning?" — Yes, but coercion is a legal matter, not a protocol matter. Courts coerce people into surrendering property all the time (garnishment, forfeiture, divorce settlements). The protocol provides the mechanism; enforcement is legal.
 - "What if a holder burns by mistake?" — Irreversible by design. The authority can issue a replacement Claim→Stake if the burn was accidental. This is no different from accidentally sending ETH to the wrong address — blockchain transactions are final.
 - "Burning reduces outstanding units — does that affect other holders?" — Yes. Burning is equivalent to share cancellation/retirement. Remaining holders' percentage ownership increases slightly. This is expected and desirable in buyback scenarios.
+
+---
+
+## 22. Post-Transition Equity Issuance
+
+**Decision**: After transition, new equity is issued as tokens via `governanceMint()` on StakeToken, not as soulbound certificates. Governance (GOVERNANCE_ROLE) can mint new tokens up to the `authorizedSupply` cap, and can raise that cap via `setAuthorizedSupply()`. This is the token-layer equivalent of the certificate-layer issuance pipeline.
+
+**Rationale**: Public companies issue equity constantly — RSUs to new hires, secondary offerings to raise capital, stock splits, acquisition consideration. Freezing the certificate layer at transition (Decision 13) doesn't mean freezing all issuance — it means graduating issuance from the certificate system to the token system.
+
+The two-step process mirrors traditional corporate governance:
+1. **Authorize** — Governance raises `authorizedSupply` (equivalent to the board authorizing new shares, or shareholders approving an increase to authorized shares in the charter)
+2. **Issue** — Governance calls `governanceMint(to, amount)` to mint tokens to a specific address (equivalent to the board approving a specific grant or offering)
+
+Both steps require GOVERNANCE_ROLE, which is controlled by the post-transition governance mechanism (vault governance seats, token holder votes). No single individual can unilaterally mint.
+
+**Why not continue using Claims and Stakes post-transition?**
+- Claims and Stakes solve problems specific to private equity: vesting, revocation, soulbound ownership, conditional rights. Post-transition, equity is fungible and liquid. Vesting for public company employees is typically handled by the employer (company holds tokens in escrow, releases on schedule) or by standard token vesting contracts (Sablier, Hedgey). The heavyweight Claim machinery isn't needed.
+- Continuing to use the certificate layer post-transition would require keeping the authority unfrozen, which undermines the trust guarantee of Decision 13.
+- Token-based issuance is composable with the entire DeFi ecosystem — governance frameworks, vesting contracts, compensation platforms.
+
+**The authorized supply cap**: `authorizedSupply` is set at token deployment and serves as the hard ceiling. `totalSupply()` can never exceed it. This is the on-chain equivalent of "authorized shares" in a corporate charter — the maximum the company can issue without a governance vote to raise it. Governance can increase it, but the increase itself is a governed action.
+
+**Counterpoints**:
+- "Governance could raise the cap to infinity and dilute everyone." — Same as IRL. A board could authorize billions of new shares. The protection is the governance mechanism itself — token holders who would be diluted can vote against it. The override mechanism in StakeVault provides an additional check: token holders can override governance decisions with a supermajority vote.
+- "New hires won't get soulbound certificates, just tokens." — Correct. Post-transition, equity is fungible. If the company wants to restrict liquidity for new grants, they use standard token vesting contracts (time-locked escrow). The soulbound phase is over — the company has "gone public."

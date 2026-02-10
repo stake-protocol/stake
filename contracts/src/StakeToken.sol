@@ -101,6 +101,17 @@ contract StakeToken is ERC20, AccessControl {
     }
 
     /**
+     * @notice Mint new tokens post-transition. Requires GOVERNANCE_ROLE.
+     *         Capped by authorizedSupply — governance must first raise the cap
+     *         via setAuthorizedSupply if needed, then mint. Two-step process
+     *         mirrors traditional board-authorized share issuance.
+     */
+    function governanceMint(address to, uint256 amount) external onlyRole(GOVERNANCE_ROLE) {
+        if (totalSupply() + amount > authorizedSupply) revert ExceedsAuthorizedSupply();
+        _mint(to, amount);
+    }
+
+    /**
      * @notice Update lockup whitelist. Only callable by governance.
      */
     function setLockupWhitelist(address target, bool whitelisted) external onlyRole(GOVERNANCE_ROLE) {
