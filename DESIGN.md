@@ -338,29 +338,30 @@ Why separate from revocation? Because RevocationMode.NONE should mean "normal re
 
 ---
 
-## 19. Embedded Wallets as the Recommended Holder Interface
+## 19. Smart Contract Wallets Required
 
-**Decision**: The protocol recommends that all Stake holders interact through embedded wallets — wallets authenticated via existing wallets, passkeys, or email rather than raw seed phrases. This is an application-layer recommendation, not a protocol-level enforcement.
+**Decision**: The protocol enforces that all Claims can only be issued to smart contract wallet addresses. EOAs (externally owned accounts like MetaMask, Phantom, or raw private keys) cannot hold soulbound certificates. This is enforced at the contract level: `issueClaim` and `issueClaimBatch` revert with `RecipientNotSmartWallet` if the recipient has no contract code.
 
-**Rationale**: The single greatest risk to onchain equity holders is not smart contract bugs or governance attacks — it's key loss. A lost seed phrase means permanently inaccessible equity with no recovery path. This is fundamentally different from traditional equity, where a lost stock certificate can be replaced by the transfer agent.
+**Rationale**: A soulbound equity certificate sitting in MetaMask alongside junk NFTs and memecoins significantly devalues the certificate. It makes the equity harder to discover, harder to manage, and feels worthless. Investors pay real money for their equity — sometimes millions. The holding infrastructure should reflect the gravity of ownership.
 
-Embedded wallets (Privy, Dynamic, Turnkey, Web3Auth, etc.) solve this by removing seed phrases entirely:
-- **Authentication through existing credentials** — Holder connects with their existing wallet(s), email, or passkeys. No 12-word phrase to write down and lose.
-- **Multi-signer support** — Multiple wallets or authentication methods can control the same embedded wallet. Losing one doesn't mean losing access.
-- **Passkey support** — Biometric authentication (Face ID, fingerprint) as a wallet signer. Hardware-bound, phishing-resistant, and familiar to non-crypto users.
-- **Recovery paths** — If a holder loses their primary auth method, backup methods (secondary wallet, email, passkey on another device) restore access.
+More critically, EOAs have a single point of failure: one seed phrase, one private key. Lose it and your equity is gone forever with no recovery path. This is unacceptable for something as high-stakes as equity ownership. Smart contract wallets (like Safe) solve this at the infrastructure level:
 
-**Why not enforce this at the protocol level**: The protocol is permissionless. Any Ethereum address can hold a Claim or Stake. Mandating a specific wallet type would compromise composability and censorship resistance. Instead, the applications built on the protocol (the cap table management tools, the onboarding flows) should default to embedded wallets and strongly discourage raw EOA usage for equity holding.
+- **Multi-signature** — Multiple signers (personal wallet + hardware wallet + backup) with configurable thresholds. No single point of failure.
+- **Recovery mechanisms** — Social recovery modules, time-delayed recovery, guardian-based recovery. If one authentication method is lost, others remain.
+- **Separation of concerns** — The equity wallet is a dedicated vault for ownership certificates, not a general-purpose wallet shared with DeFi positions and collectibles.
+- **Auditability** — All transactions require multi-sig approval. A compromised signer can't unilaterally burn or interact with certificates.
 
-**How this resolves other risks**:
-- **Key loss**: Eliminated by design — there are no keys to lose
-- **Death/inheritance**: Reduces to "does the executor have access to the holder's email/device?" — a solved problem in estate law
-- **Fraud via false key-loss claims**: If a holder claims they lost access but actually didn't, the embedded wallet provider's logs can verify whether the account was accessed. This is far more auditable than "I lost my seed phrase."
+**Implementation**: `issueClaim` checks `to.code.length > 0` before proceeding. If the recipient is an EOA (no contract code), the transaction reverts. Since Claims can only be issued to smart wallets, and Stakes are minted to the Claim holder's address, Stakes automatically inherit the protection. The protocol doesn't mandate a specific wallet implementation — any smart contract that can receive ERC-721 tokens works. Safe is the recommended default, but custom implementations are allowed.
+
+**Recommended wallet: Safe (formerly Gnosis Safe)**. Battle-tested, audited, open source, and has the exact properties needed: multi-sig, modular recovery, and a large ecosystem of integrations. Applications built on the protocol should deploy a Safe for each stakeholder as part of the onboarding flow.
+
+**This is still permissionless**: Anyone can deploy a Safe for free. No KYC, no approval, no centralized provider. The restriction is "your wallet must be a contract with recovery capabilities," not "you must be approved by someone." This is the equivalent of "you must have a bank account to receive a wire transfer" — infrastructure, not censorship.
 
 **Counterpoints**:
-- "Embedded wallets introduce a centralized dependency." — The wallet provider is a convenience layer, not a custodian. The private key is still held by the user (via MPC, enclave, or passkey). If the provider disappears, the key can be exported. This is different from custodial solutions where the provider holds the key.
-- "What if the embedded wallet provider is compromised?" — Same risk as any authentication provider. Mitigation: multi-signer setup where the embedded wallet is one of N signers. The protocol's soulbound property means a compromised wallet can't transfer Stakes to the attacker — the worst case is a burn (which is visible on-chain and auditable).
-- "Crypto-native holders prefer their own wallets." — Fine. The protocol doesn't prevent this. But for the 99% of equity holders who are not crypto-native, embedded wallets are the right default.
+- "This adds friction to onboarding." — Yes, but the friction is one-time (deploy a Safe) and can be automated in the application layer. The alternative — losing equity forever because you forgot a seed phrase — is infinitely more friction.
+- "What about gas costs?" — Interacting through a Safe costs more gas than an EOA (proxy call overhead). But this is equity, not a DEX trade. You're not doing this thousands of times a day. The gas premium is trivial relative to the value being protected.
+- "What about future wallet standards?" — The protocol checks `code.length > 0`, not "is this specifically a Safe." Any future smart wallet standard that deploys contract code will work. The protocol is forward-compatible.
+- "What about testing and development?" — Tests deploy minimal mock wallet contracts. Development environments use the same pattern. This is a small overhead that enforces correctness from day one.
 
 ---
 

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test, console} from "forge-std/Test.sol";
+import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import {
     StakeCertificates,
     StakePactRegistry,
@@ -32,8 +33,16 @@ import {
     InvalidVault,
     InvalidAuthority,
     ArrayLengthMismatch,
-    NotHolder
+    NotHolder,
+    RecipientNotSmartWallet
 } from "../src/StakeCertificates.sol";
+
+/// @notice Minimal smart contract wallet for testing. Implements IERC721Receiver.
+contract MockWallet is IERC721Receiver {
+    function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
+        return this.onERC721Received.selector;
+    }
+}
 
 contract StakeCertificatesTest is Test {
     StakeCertificates public certificates;
@@ -42,8 +51,9 @@ contract StakeCertificatesTest is Test {
     SoulboundStake public stake;
 
     address public authority = address(0x1);
-    address public recipient = address(0x2);
-    address public recipient2 = address(0x3);
+    address public recipient;
+    address public recipient2;
+    address public recipient3;
     address public vaultAddr = address(0x4);
 
     bytes32 public contentHash = keccak256("test pact content");
@@ -54,6 +64,11 @@ contract StakeCertificatesTest is Test {
     bytes32 public pactId;
 
     function setUp() public {
+        // Deploy mock smart wallets for recipients
+        recipient = address(new MockWallet());
+        recipient2 = address(new MockWallet());
+        recipient3 = address(new MockWallet());
+
         vm.startPrank(authority);
         certificates = new StakeCertificates(authority);
         registry = certificates.REGISTRY();
@@ -251,8 +266,9 @@ contract StakeCertificatesTest is Test {
     }
 
     function test_IssueClaim_RevertsInvalidRecipient() public {
+        // address(0) is an EOA (no code), so it hits the smart wallet check first
         vm.prank(authority);
-        vm.expectRevert(InvalidRecipient.selector);
+        vm.expectRevert(RecipientNotSmartWallet.selector);
         certificates.issueClaim(keccak256("test"), address(0), pactId, 1000, UnitType.SHARES, 0, 0, 0, 0);
     }
 
@@ -260,6 +276,31 @@ contract StakeCertificatesTest is Test {
         vm.prank(authority);
         vm.expectRevert(InvalidUnits.selector);
         certificates.issueClaim(keccak256("test"), recipient, pactId, 0, UnitType.SHARES, 0, 0, 0, 0);
+    }
+
+    function test_IssueClaim_RevertsForEOA() public {
+        address eoa = address(0xBEEF);
+        vm.prank(authority);
+        vm.expectRevert(RecipientNotSmartWallet.selector);
+        certificates.issueClaim(keccak256("eoa-test"), eoa, pactId, 1000, UnitType.SHARES, 0, 0, 0, 0);
+    }
+
+    function test_IssueClaimBatch_RevertsForEOA() public {
+        bytes32[] memory ids = new bytes32[](2);
+        ids[0] = keccak256("batch-eoa-1");
+        ids[1] = keccak256("batch-eoa-2");
+
+        address[] memory recipients_ = new address[](2);
+        recipients_[0] = recipient; // smart wallet — OK
+        recipients_[1] = address(0xBEEF); // EOA — should revert
+
+        uint256[] memory units_ = new uint256[](2);
+        units_[0] = 1000;
+        units_[1] = 2000;
+
+        vm.prank(authority);
+        vm.expectRevert(RecipientNotSmartWallet.selector);
+        certificates.issueClaimBatch(ids, recipients_, pactId, units_, UnitType.SHARES, 0, 0, 0, 0);
     }
 
     function test_VoidClaim() public {
@@ -816,7 +857,7 @@ contract StakeCertificatesTest is Test {
         address[] memory recipients_ = new address[](3);
         recipients_[0] = recipient;
         recipients_[1] = recipient2;
-        recipients_[2] = address(0x5);
+        recipients_[2] = recipient3;
 
         uint256[] memory maxUnitsArr = new uint256[](3);
         maxUnitsArr[0] = 1000;
@@ -830,7 +871,7 @@ contract StakeCertificatesTest is Test {
         assertEq(claimIds.length, 3);
         assertEq(claim.ownerOf(claimIds[0]), recipient);
         assertEq(claim.ownerOf(claimIds[1]), recipient2);
-        assertEq(claim.ownerOf(claimIds[2]), address(0x5));
+        assertEq(claim.ownerOf(claimIds[2]), recipient3);
 
         ClaimState memory c = claim.getClaim(claimIds[1]);
         assertEq(c.maxUnits, 2000);

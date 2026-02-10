@@ -41,6 +41,7 @@ error InvalidAuthority();
 error ArrayLengthMismatch();
 error NothingToRedeem();
 error NotHolder();
+error RecipientNotSmartWallet();
 
 // ============ Enums ============
 
@@ -917,6 +918,8 @@ contract StakeCertificates is AccessControl, Pausable {
         whenNotPaused
         returns (uint256)
     {
+        if (to.code.length == 0) revert RecipientNotSmartWallet();
+
         bytes32 paramsHash = keccak256(abi.encode(to, pactId, maxUnits, unitType, redeemableAt, vestStart, vestCliff, vestEnd));
 
         uint256 existing = claimIdByIssuanceId[issuanceId];
@@ -956,6 +959,7 @@ contract StakeCertificates is AccessControl, Pausable {
 
         uint256[] memory claimIds = new uint256[](len);
         for (uint256 i = 0; i < len; i++) {
+            if (recipients[i].code.length == 0) revert RecipientNotSmartWallet();
             bytes32 paramsHash = keccak256(abi.encode(recipients[i], pactId, maxUnitsArr[i], unitType, redeemableAt, vestStart, vestCliff, vestEnd));
 
             uint256 existing = claimIdByIssuanceId[issuanceIds[i]];
