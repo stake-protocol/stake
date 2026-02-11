@@ -439,3 +439,241 @@ Both steps require GOVERNANCE_ROLE, which is controlled by the post-transition g
 **Counterpoints**:
 - "Governance could raise the cap to infinity and dilute everyone." — Same as IRL. A board could authorize billions of new shares. The protection is the governance mechanism itself — token holders who would be diluted can vote against it. The override mechanism in StakeVault provides an additional check: token holders can override governance decisions with a supermajority vote.
 - "New hires won't get soulbound certificates, just tokens." — Correct. Post-transition, equity is fungible. If the company wants to restrict liquidity for new grants, they use standard token vesting contracts (time-locked escrow). The soulbound phase is over — the company has "gone public."
+
+---
+
+## 23. Pact as 1:1 Bilateral Agreement
+
+**Decision**: A Pact is always a bilateral agreement between the authority and one holder. Each investor, employee, or advisor gets their own Pact, even when the terms are identical to others in the same round. "Rounds" (Series Seed, Employee Pool, Advisor Grants) are an application-layer grouping concept, not a protocol primitive.
+
+**Rationale**: IRL, even when five investors participate in the same "Series Seed" round with identical terms, each investor signs their own SAFE or stock purchase agreement. Each is a separate bilateral contract. The "round" is a business concept used for communication and cap table organization — it has no legal existence independent of the individual agreements.
+
+In the protocol, this works naturally. `computePactId = keccak256(issuerId, contentHash, pactVersion)`. Each investor's signed agreement has a unique `contentHash` (different party names, signature dates, wallet addresses), so each produces a unique Pact. The `pactVersion` field provides a natural grouping key — all investors in the same round can share the same version string (e.g., `"series-seed-v1"`) while having different content hashes. The application layer uses this to group Pacts into rounds for display.
+
+**Counterpoints**:
+- "Isn't one Pact per round simpler?" — Simpler for the app, but wrong for the legal model. A Pact represents a signed agreement. You don't sign one SAFE for five investors — you sign five SAFEs. The protocol should mirror legal reality, not simplify it away.
+- "More Pacts means more gas." — True, but Pact creation is a one-time cost per agreement. The number of Pacts equals the number of signed agreements, which is exactly the right number.
+- "How do I query all investors in a round?" — The application indexes Pacts by `pactVersion` and groups them. This is a database query, not a protocol operation.
+
+---
+
+## 24. Ethereum L1 Only
+
+**Decision**: The protocol launches exclusively on Ethereum mainnet. No multi-chain deployment, no L2 variants, no cross-chain bridging at launch.
+
+**Rationale**: Equity is the most consequential financial instrument a company issues. The chain it lives on must be the most credible, permanent, and battle-tested chain available. Ethereum L1 is the only chain with:
+- 10+ years of unbroken operation
+- The strongest validator set and economic security
+- Universal recognition by regulators, institutions, and developers
+- No single point of failure (no sequencer, no multisig upgrade key)
+
+Gas costs are real — `issueClaimBatch` for 50 recipients could cost hundreds of dollars on L1. But this is less than a single hour of a corporate lawyer's time, and you're recording equity ownership on the most permanent ledger humanity has ever built. The cost is the price of legitimacy.
+
+**Alternatives considered**:
+- *L2 deployment (Base, Arbitrum)*: Cheaper gas, but introduces sequencer risk, upgrade key risk, and reduced permanence guarantees. An L2 could theoretically halt or be upgraded in ways that affect certificate state. Acceptable for many use cases; not acceptable for equity.
+- *Multi-chain with authority choice*: Adds complexity for VCs tracking holdings across chains (multi-chain indexer required). Creates fragmentation — two companies on different chains can't be compared in one view without cross-chain infrastructure.
+- *L2 for batch operations, L1 for settlement*: Interesting hybrid, but adds bridging complexity and trust assumptions. Premature optimization.
+
+**Counterpoints**:
+- "Gas costs will price out small companies." — A company issuing equity can absorb a few hundred dollars in gas. If they can't, they're not ready for formalized equity infrastructure. The protocol serves companies making real equity commitments, not hobbyist DAOs.
+- "What about Ethereum's scalability roadmap?" — EIP-4844, danksharding, and future upgrades will reduce L1 costs over time. The protocol benefits from these improvements without needing to migrate.
+- "L2s are the future." — They may be. When an L2 achieves the same credibility, permanence, and decentralization as L1, the protocol can be deployed there too. But we don't chase hype — we follow security guarantees.
+
+---
+
+## 25. Founder Shares
+
+**Decision**: Founder shares follow the standard Pact → Claim → Stake lifecycle. Non-vesting founders issue a Claim with `vestEnd=0` (all units immediately vested) and redeem to Stake in the same session. Vesting founders issue a Claim with a standard schedule (typically 4 years, 1-year cliff). Co-founder revocation protection is provided by StakeBoard governance.
+
+**Rationale**: Founder shares are not a special case — they're the first application of the general lifecycle. The protocol doesn't distinguish between founder equity, employee equity, or investor equity at the contract level. The Pact defines the terms; the Claim enforces them; the Stake confirms them.
+
+**Non-vesting founders** (sole founder, or founders who want immediate ownership): Create Pact → issue Claim with `vestEnd=0` → immediately call `redeemToStake`. Two transactions, takes seconds. The Claim is a waypoint, not a waiting room. All units are immediately vested, so redemption succeeds on the same block.
+
+**Vesting founders** (co-founders with mutual vesting): Create Pact with `RevocationMode.UNVESTED_ONLY` → issue Claim with 4-year vesting / 1-year cliff → redeem as units vest. This maps exactly to how founder vesting works in traditional startups — restricted stock with a repurchase right.
+
+**The co-founder revocation risk**: If Founder A is the authority, they can revoke Founder B's Claim (`revokeClaim` freezes unvested units) or even void it entirely (`voidClaim` destroys the Claim regardless of RevocationMode). This is the same risk as IRL — in a two-person startup, one person often controls the board. The protocol-level answer is StakeBoard: the moment there are two founders, both should be on the Board. Revocation and void then require a board proposal with quorum approval. Neither founder can unilaterally revoke the other.
+
+**Pre-Board (sole founder)**: No protection needed and none provided. If you're the only stakeholder, you can't dilute or revoke yourself. Board governance kicks in when outside stakeholders arrive.
+
+**Counterpoints**:
+- "Should founders skip Claims entirely and go straight to Stake?" — No. The protocol has no `issueStake` function — Stakes are always minted through redemption. This is deliberate: it preserves the audit trail (Pact → Claim → Stake) and ensures every Stake has provenance.
+- "What if a founder wants to change their vesting schedule?" — Amend the Pact (if mutable), void the old Claim, issue a new one. This is the same process as renegotiating founder vesting IRL.
+- "What about single-founder companies — do they need vesting?" — That's a business decision, not a protocol decision. Some sole founders vest their own shares (for investor credibility). Some don't. The protocol supports both.
+
+---
+
+## 26. Crowdfunding and Public Issuance
+
+**Decision**: The protocol does not include a permissionless mint function. There is no mechanism for the public to self-mint Claims by depositing funds. Crowdfunding and public issuance are supported through the existing authority-controlled `issueClaim` and `issueClaimBatch` functions, with compliance handled at the application layer.
+
+**Rationale**: Crowdfunding equity is heavily regulated in every jurisdiction:
+- **US**: Regulation CF ($5M cap, requires registered funding portal, disclosure requirements), Reg D 506(c) (accredited investors only), Reg A+ (up to $75M, SEC qualification required)
+- **UK**: FCA-regulated platforms (Seedrs, Crowdcube)
+- **EU**: European Crowdfunding Service Provider Regulation
+- Every jurisdiction requires KYC/AML, investor accreditation or limits, and disclosure
+
+A permissionless mint function would be an invitation for illegal securities offerings. The protocol should not make it easy to skip compliance questions.
+
+**The soulbound advantage**: Soulbound certificates actually reduce the regulatory risk of crowdfunding because there is no speculative secondary market. Nobody can flip a soulbound certificate. The certificate is purely an ownership instrument, not a tradeable asset. This could make Reg CF-style crowdfunding significantly cleaner — but the compliance requirements (KYC, limits, disclosure) still apply and must be handled at the application layer.
+
+**How crowdfunding works with the protocol**:
+1. Application handles compliance (KYC/AML, accreditation, investment limits)
+2. Investor sends funds to company's treasury (fiat wire, USDC, ETH)
+3. Authority verifies payment receipt
+4. Authority calls `issueClaimBatch` for all verified investors
+5. Claims are issued to investors' Smart Wallets
+
+**Optional escrow module**: For crypto-native payments, an escrow contract can be built as a separate module (not core protocol). The escrow holds deposits, the authority finalizes, and the escrow triggers `issueClaim` for each depositor. This is an application-layer contract that interacts with the protocol, not a core protocol feature.
+
+**Counterpoints**:
+- "Isn't this just recreating traditional gatekeeping?" — No. The authority controls issuance because they're legally responsible for compliance. The protocol doesn't gate who can be an investor — it gates who can issue equity. Anyone can receive a Claim to their Smart Wallet. The compliance burden is on the issuer, not the protocol.
+- "What about DAOs that want permissionless membership?" — DAOs are not the target use case. The protocol serves companies issuing equity to identified stakeholders. Permissionless membership tokens are a different product.
+
+---
+
+## 27. Mass Grants and Small Allocations
+
+**Decision**: Mass grants to supporters, family members, prior investors, or community contributors are handled through `issueClaimBatch` with appropriate Pact terms. This is a standard application of the protocol, not an edge case requiring special mechanisms.
+
+**Rationale**: Founders routinely issue small equity grants to people outside the traditional cap table:
+- **Friends and family** — Early believers who invest small amounts
+- **Advisor grants** — 0.25-1% each to advisors contributing expertise
+- **Prior investors** — Continuation equity for investors from a previous venture
+- **Community contributors** — Open source developers, early users, evangelists
+
+IRL, these often come "from the founder's personal stock" — the founder transfers shares from their own holdings to the recipient. In the protocol, there is no "transfer from personal allocation" because certificates are soulbound. Instead, the authority issues new Claims under a Pact that defines the terms.
+
+**How it works**:
+1. Create a Pact specifying the grant terms (e.g., "Founder Personal Grant — Liquidation Rights Only, No Voting, No Governance")
+2. Call `issueClaimBatch` with all recipient wallets and unit amounts
+3. Recipients receive Claims to their Smart Wallets
+4. Claims vest per the Pact terms (or immediately if no vesting)
+
+**The "from personal stock" semantic**: The Pact's off-chain content (the legal document) specifies that the issuance is from the founder's personal allocation. This is a legal term, not a protocol mechanism. The economic effect is the same: the founder's effective ownership percentage decreases by the granted amount. If the founder wants to make it balance-sheet neutral, they can burn an equivalent number of their own Stake units.
+
+**Gas considerations**: `issueClaimBatch` for 50 recipients on L1 will cost meaningful gas (roughly 200K+ gas per recipient). This is acceptable for a one-time operation, but if the company needs to issue hundreds of small grants, the gas cost becomes significant. This is a future argument for L2 deployment of specific operations, not a protocol design change.
+
+**Counterpoints**:
+- "Should there be a minimum unit threshold?" — No. The protocol doesn't opine on what constitutes a meaningful grant. 1 unit or 1 million units — the authority decides.
+- "These small holders will clutter the cap table." — That's an application-layer display concern. The verifier can filter by minimum holdings or group small holders into an "Other" category.
+
+---
+
+## 28. Fundraising Process
+
+**Decision**: The protocol is payment-agnostic. It records equity ownership when instructed by the authority. The payment mechanism (wire transfer, USDC, ETH, check, stock swap) is outside the protocol's scope. Claim issuance is always authority-controlled, never automated by payment receipt.
+
+**Rationale**: Equity issuance and payment are separate events that happen to be causally related. The protocol handles the equity side; the payment side is handled by whatever rails the company uses. Coupling them at the protocol level would:
+- Require the protocol to understand payment rails (fiat, crypto, escrow, multi-tranche)
+- Create attack surface (fake payment proofs, double-spend, race conditions)
+- Limit flexibility (what about stock-for-stock swaps? In-kind contributions? Convertible notes?)
+
+**The end-to-end fundraising flow**:
+1. **Term sheet negotiated** — Off-chain. Terms agreed between company and investor.
+2. **Pact created** — Authority calls `createPact` with the content hash of the signed agreement (PDF on IPFS/Arweave). This is the on-chain record of the terms.
+3. **Payment sent** — Investor wires funds or sends crypto to company's treasury wallet. The protocol doesn't participate in this step.
+4. **Authority verifies receipt** — Off-chain confirmation that payment was received.
+5. **Claim issued** — Authority calls `issueClaim` with the investor's Smart Wallet address. The Claim represents the investor's equity right.
+
+**Automation at the application layer**: The app can automate the workflow without changing the protocol:
+- App tracks pending investments (term sheet signed, awaiting payment)
+- App monitors treasury wallet for incoming crypto deposits
+- When deposit confirmed, app queues the `issueClaim` transaction
+- Authority reviews and approves (signs the transaction)
+
+For wire transfers, someone enters "wire received" in the app. For crypto payments, the app can detect the deposit on-chain and auto-queue.
+
+**Counterpoints**:
+- "Shouldn't payment and issuance be atomic?" — For crypto payments, an escrow module could provide atomicity (deposit + issuance in one transaction). But this is an optional application-layer contract, not a core protocol feature. For fiat payments, atomicity is impossible — wires take days and can be reversed.
+- "What about SAFEs that convert at a future round?" — The SAFE terms are encoded in the Pact. The Claim is issued when the SAFE is signed (or when the triggering event occurs — the authority decides). The `redeemableAt` field can gate redemption until the conversion event.
+- "What about multi-tranche investments?" — Issue multiple Claims under the same Pact, each representing a tranche. Or use a single Claim with partial redemption as tranches are paid. The protocol supports both patterns.
+
+---
+
+## 29. Privacy Model
+
+**Decision**: The protocol is transparent at the chain layer and private by default at the application layer. On-chain state (wallet addresses, unit amounts, certificate IDs) is publicly readable — this is an inherent property of public blockchains. Holder identities, metadata (names, roles, titles), and sensitive details are stored off-chain with access controls managed by the application.
+
+**Rationale**: There is an irreconcilable tension between blockchain transparency and traditional cap table privacy. IRL, cap tables are private — only the company, its counsel, and sometimes investors see the full picture. On a public blockchain, anyone can call `ownerOf(tokenId)` and read storage slots.
+
+The protocol resolves this tension by separating what it must expose (on-chain state) from what it can protect (off-chain metadata):
+
+**What is public (on-chain, cannot be hidden)**:
+- Wallet addresses holding certificates
+- Number of certificates and unit amounts
+- Pact content hashes and creation timestamps
+- Transaction history (issuance, revocation, redemption)
+
+**What is private (off-chain, access-controlled)**:
+- Holder identity (name, email, legal entity)
+- Role and title information
+- Certificate metadata beyond on-chain fields
+- Pact document content (the URI can point to an encrypted document)
+
+**Natural privacy through Smart Wallets**: Because the protocol requires Smart Contract Wallets (Decision 19), each holder's Safe is purpose-built for equity. It has no ENS name, no DeFi transaction history, no association with the holder's personal wallet. This provides pseudonymity by default — an observer can see that `0x1234...5678` holds 50,000 units, but cannot easily link that address to a real-world identity.
+
+**Verifier privacy tiers**:
+- **Public view**: Aggregate stats (total holders, total units, distribution chart). Individual wallet addresses visible but not linked to identities.
+- **Authenticated view (authority)**: Full cap table with holder names, roles, and detailed certificate info.
+- **Holder view**: Own certificates only, with vesting status and Pact documents.
+- **Investor due diligence view**: Authority can generate a shareable view with configurable privacy (e.g., anonymized: "Holder A: X units, Holder B: Y units").
+
+**Counterpoints**:
+- "Can't someone just look up the Smart Wallet on Etherscan?" — They can see the certificate balance and transaction history, but not who controls the wallet. The wallet is a contract with no identifying information on-chain. Linking it to an identity requires off-chain information that the application controls.
+- "What about Pact URIs?" — Pact URIs can point to encrypted documents on IPFS/Arweave. Only parties with the decryption key (authority and holder) can read the content. The URI itself reveals nothing about the terms.
+- "Shouldn't we use a privacy chain?" — Future option. Deploying on a chain with confidential state (Aztec, or a privacy-enabled L2) would make on-chain data itself private. This is the ultimate solution but not available in production today. The protocol is designed to work on any EVM chain without modification, so migration to a privacy chain is possible without protocol changes.
+
+---
+
+## 30. Company Identification
+
+**Decision**: The StakeCertificates contract address is the canonical company identifier. `ISSUER_ID` (the immutable hash of `chainId + authority` set at deployment) is the on-chain permanent identifier. Human-readable names and slugs are application-layer concerns managed by the app's database.
+
+**Rationale**: A company needs a stable identifier that:
+1. Is unique and permanent
+2. Does not change when the authority wallet rotates
+3. Can be shared, linked, and verified
+4. Works in URLs, APIs, and on-chain references
+
+The contract address satisfies all four requirements. It is set at deployment, never changes, and is universally addressable. `ISSUER_ID` adds chain-awareness (same authority on different chains produces different IDs), making it useful for multi-chain scenarios.
+
+**What each identifier is**:
+- **Contract address** (`StakeCertificates.address`): The deployed contract. Permanent, unique per deployment. This is what the verifier uses. `verify.stake.ist?company=0x1234...`
+- **ISSUER_ID** (`keccak256(chainId, authority)`): Immutable hash set at construction. Survives authority rotation (it was computed once from the *original* authority). Used internally for Pact ID computation and cross-referencing.
+- **Authority wallet** (`authority`): The Safe that controls the protocol instance. Can change via `transferAuthority()`. This is the admin key — not an identifier.
+- **Treasury wallet**: Not a protocol concept at all. The company manages its treasury separately. The protocol doesn't know about it.
+- **App-layer slug** (e.g., "acme-corp"): Human-readable identifier stored in the application database. Maps to the contract address. Used in URLs: `app.stake.ist/company/acme-corp`. Not on-chain.
+
+**Counterpoints**:
+- "Contract addresses are ugly." — Agreed. That's why the app maps human-readable slugs to contract addresses. The protocol doesn't need a naming registry — that's application-layer infrastructure. Optionally, the company can register an ENS name pointing to their contract.
+- "What if the company deploys a new StakeCertificates?" — That's a new company instance with a new contract address. Certificate migration would require voiding old Claims and reissuing, which is a major operation. The protocol treats each deployment as a distinct entity.
+- "What about ENS as the identifier?" — ENS names expire, can be transferred, and require annual renewal. They're not permanent enough to be canonical identifiers for equity infrastructure. Use them as vanity pointers, not as primary keys.
+
+---
+
+## 31. App Architecture: Separated Subdomains
+
+**Decision**: The Stake Protocol application uses four subdomains, each serving a distinct user type:
+- `stake.ist` — Marketing, documentation, thesis
+- `app.stake.ist` — Issuer/authority dashboard (company management)
+- `own.stake.ist` — Holder portal (personal equity portfolio across all companies)
+- `verify.stake.ist` — Public verifier (certificate and cap table verification)
+
+All subdomains share the same codebase and deployment, routed by the `SubdomainRouter` component.
+
+**Rationale**: Issuers and holders have fundamentally different mental models:
+
+**Issuers** are operators. They manage one company's cap table, issue equity, create Pacts, govern revocation. Their UX is dashboards, tables, and transaction flows — like Carta from the company's side.
+
+**Holders** are recipients. They check their equity across multiple companies, view vesting progress, read their Pact documents. Their UX is cards, status displays, and portfolio views — like Carta from the employee/investor side.
+
+A single app serving both roles creates a first-time user problem: when a new wallet connects, the app doesn't know whether they're founding a company or checking their equity. Asking "what are you?" on first contact signals product confusion. Separate subdomains eliminate this entirely — the URL declares intent.
+
+**The founder-who-is-also-holder**: Founders use `app.stake.ist` to manage their company and `own.stake.ist` to view their personal holdings (including holdings in other companies where they're an advisor or angel investor). These are different cognitive contexts — one is "running my company" and the other is "managing my portfolio." Cross-links between subdomains handle navigation.
+
+**Why not separate codebases?** Both apps share infrastructure: wallet connection (wagmi, RainbowKit), UI components (shadcn), certificate rendering, on-chain data reading. A monorepo with shared packages would work but adds build complexity. The SubdomainRouter pattern — already proven with `verify.stake.ist` — keeps everything in one codebase with clean separation at the routing layer.
+
+**Counterpoints**:
+- "Two bookmarks instead of one." — True. But founders already context-switch between tools constantly. The mental clarity of "this URL is for managing my company" vs "this URL is for viewing my holdings" is worth the extra bookmark.
+- "Code duplication." — Shared components (wallet connection, certificate display, formatting utilities) live in `src/components/` and are imported by both subdomain branches. No duplication required.
+- "What about the public verifier?" — `verify.stake.ist` is already a separate subdomain serving the public verifier. The pattern is established. `own.stake.ist` extends it.
