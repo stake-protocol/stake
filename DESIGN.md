@@ -627,27 +627,30 @@ The protocol resolves this tension by separating what it must expose (on-chain s
 
 ## 30. Company Identification
 
-**Decision**: The StakeCertificates contract address is the canonical company identifier. `ISSUER_ID` (the immutable hash of `chainId + authority` set at deployment) is the on-chain permanent identifier. Human-readable names and slugs are application-layer concerns managed by the app's database.
+**Decision**: `ISSUER_ID` is the canonical company identifier. It is the immutable hash of `keccak256(chainId, authority)` set once at deployment and never changes — even when the authority wallet rotates. The StakeCertificates contract address is the locator (where the contract lives). Human-readable names and slugs are application-layer concerns.
 
 **Rationale**: A company needs a stable identifier that:
 1. Is unique and permanent
 2. Does not change when the authority wallet rotates
-3. Can be shared, linked, and verified
+3. Encodes meaningful context (which chain, who founded it)
 4. Works in URLs, APIs, and on-chain references
 
-The contract address satisfies all four requirements. It is set at deployment, never changes, and is universally addressable. `ISSUER_ID` adds chain-awareness (same authority on different chains produces different IDs), making it useful for multi-chain scenarios.
+`ISSUER_ID` satisfies all four. It is computed once from the founding authority and chain, stored immutably, and used throughout the protocol as the anchor for Pact ID computation and cross-referencing. It is the protocol's equivalent of an EIN (employer identification number) — the identity of the company, independent of where it's located or who currently runs it.
+
+The contract address is the *locator*, not the *identifier*. It tells you where to find the contract on-chain, the same way an office address tells you where to find a company. You need the contract address to interact with the chain, but the `ISSUER_ID` is what makes it *that* company.
 
 **What each identifier is**:
-- **Contract address** (`StakeCertificates.address`): The deployed contract. Permanent, unique per deployment. This is what the verifier uses. `verify.stake.ist?company=0x1234...`
-- **ISSUER_ID** (`keccak256(chainId, authority)`): Immutable hash set at construction. Survives authority rotation (it was computed once from the *original* authority). Used internally for Pact ID computation and cross-referencing.
+- **ISSUER_ID** (`keccak256(chainId, authority)`): The canonical company identifier. Immutable, set at construction. Survives authority rotation. This is what the verifier uses: `verify.stake.ist?issuer=0xabc123...`. This is what founders share. This is what appears in cap table headers. App-layer slugs map to `ISSUER_ID`, not to contract addresses.
+- **Contract address** (`StakeCertificates.address`): The locator. Permanent and unique per deployment, but it's an implementation detail — the address where you send transactions. Think of it as the postal address, not the identity.
 - **Authority wallet** (`authority`): The Safe that controls the protocol instance. Can change via `transferAuthority()`. This is the admin key — not an identifier.
 - **Treasury wallet**: Not a protocol concept at all. The company manages its treasury separately. The protocol doesn't know about it.
-- **App-layer slug** (e.g., "acme-corp"): Human-readable identifier stored in the application database. Maps to the contract address. Used in URLs: `app.stake.ist/company/acme-corp`. Not on-chain.
+- **App-layer slug** (e.g., "acme-corp"): Human-readable identifier stored in the application database. Maps to `ISSUER_ID`. Used in URLs: `app.stake.ist/company/acme-corp`. Not on-chain.
 
 **Counterpoints**:
-- "Contract addresses are ugly." — Agreed. That's why the app maps human-readable slugs to contract addresses. The protocol doesn't need a naming registry — that's application-layer infrastructure. Optionally, the company can register an ENS name pointing to their contract.
-- "What if the company deploys a new StakeCertificates?" — That's a new company instance with a new contract address. Certificate migration would require voiding old Claims and reissuing, which is a major operation. The protocol treats each deployment as a distinct entity.
+- "ISSUER_ID is a hash — it's not human-readable." — Neither is an EIN or a UUID. Human-readable identifiers (slugs, ENS names) are the application layer's job. The protocol provides a stable, unique, content-addressed identifier. The app maps it to something readable.
+- "What if the company deploys a new StakeCertificates?" — New deployment with the same authority on the same chain produces the same `ISSUER_ID`. This means the company identity persists across redeployments. If the authority changes (new founder), the `ISSUER_ID` for the new deployment will differ — correctly signaling a different entity.
 - "What about ENS as the identifier?" — ENS names expire, can be transferred, and require annual renewal. They're not permanent enough to be canonical identifiers for equity infrastructure. Use them as vanity pointers, not as primary keys.
+- "Can two deployments have the same ISSUER_ID?" — Yes, if the same authority deploys on the same chain twice. The `ISSUER_ID` identifies the *company* (authority + chain), not the *deployment*. Multiple deployments by the same authority on the same chain are the same company. The app layer can disambiguate if needed (by contract address).
 
 ---
 
