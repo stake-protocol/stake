@@ -72,7 +72,7 @@ contract DeployAndCreatePact is Script {
 
         // Create initial pact
         bytes32 pactId =
-            certificates.createPact(contentHash, rightsRoot, uri, version, true, RevocationMode.UNVESTED_ONLY, true);
+            certificates.createPact(contentHash, rightsRoot, uri, version, true, RevocationMode.UNVESTED_ONLY);
 
         vm.stopBroadcast();
 
@@ -123,7 +123,7 @@ contract DeployProduction is Script {
         StakeCertificates certificates = new StakeCertificates(authority);
 
         bytes32 pactId =
-            certificates.createPact(contentHash, rightsRoot, uri, version, true, RevocationMode.UNVESTED_ONLY, true);
+            certificates.createPact(contentHash, rightsRoot, uri, version, true, RevocationMode.UNVESTED_ONLY);
 
         vm.stopBroadcast();
 

@@ -19,6 +19,10 @@ import {ProtocolFeeLiquidator} from "./ProtocolFeeLiquidator.sol";
  *   3. Vault.processTransitionBatch() — transfers certs to vault, mints tokens.
  *   4. Holders call claimTokens() after lockup to withdraw.
  *   5. Governance seats become available for auction.
+ *
+ * Stakes are unconditional ownership — no vesting, no revocation. Every Stake unit
+ * converts 1:1 to tokens at transition. This simplifies the vault significantly:
+ * no vesting calculations, no releaseVestedTokens, no partial claims.
  */
 contract StakeVault is AccessControl, ReentrancyGuard {
     // ============ Roles ============
@@ -52,13 +56,8 @@ contract StakeVault is AccessControl, ReentrancyGuard {
     // ============ Certificate Tracking ============
     struct DepositedCert {
         address originalHolder;
-        uint256 vestedUnitsAtTransition;
-        uint256 totalUnits;
-        uint64 vestStart;
-        uint64 vestCliff;
-        uint64 vestEnd;
-        bool tokensFullyClaimed;
-        uint256 tokensClaimed;
+        uint256 units;
+        bool tokensClaimed;
     }
 
     mapping(uint256 => DepositedCert) public depositedStakes;
@@ -177,6 +176,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
 
     /**
      * @notice Process transition: transfer stakes to vault and mint tokens.
+     *         Stakes are unconditional ownership — every unit converts 1:1 to tokens.
      *         Protocol fees accumulate in the vault — call deployLiquidator() after all
      *         batches are processed to deploy the fee liquidator with all fee tokens.
      * @param stakeIds Array of stake token IDs to process.
@@ -185,7 +185,6 @@ contract StakeVault is AccessControl, ReentrancyGuard {
         if (!certificates.transitioned()) revert TransitionNotInitiated();
 
         // Verify this vault is correctly wired to the certificate and token contracts.
-        // Prevents deployment misconfigurations from bricking or losing assets.
         if (address(stakeContract.vault()) != address(this)) revert VaultNotBound();
         if (!token.hasRole(token.MINTER_ROLE(), address(this))) revert VaultNotBound();
 
@@ -200,7 +199,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
         for (uint256 i; i < stakeIds.length; i++) {
             uint256 stakeId = stakeIds[i];
 
-            // Prevent duplicate processing — each stakeId can only be deposited once
+            // Prevent duplicate processing
             if (depositedStakes[stakeId].originalHolder != address(0)) revert AlreadyDeposited();
 
             address holder = stakeContract.ownerOf(stakeId);
@@ -209,26 +208,19 @@ contract StakeVault is AccessControl, ReentrancyGuard {
             // Transfer cert to vault (vault is authorized in _update hook)
             stakeContract.transferFrom(holder, address(this), stakeId);
 
-            // Calculate vested units at transition
-            uint256 vestedNow = s.revoked ? s.units : _calculateVested(s);
-
+            // Stakes are unconditional — all units are fully owned
             depositedStakes[stakeId] = DepositedCert({
                 originalHolder: holder,
-                vestedUnitsAtTransition: vestedNow,
-                totalUnits: s.units,
-                vestStart: s.vestStart,
-                vestCliff: s.vestCliff,
-                vestEnd: s.vestEnd,
-                tokensFullyClaimed: false,
-                tokensClaimed: 0
+                units: s.units,
+                tokensClaimed: false
             });
             depositedStakeIds.push(stakeId);
 
-            // Mint tokens for vested units
-            if (vestedNow > 0) {
-                token.mint(address(this), vestedNow);
-                totalTokensAllocated[holder] += vestedNow;
-                totalMinted += vestedNow;
+            // Mint tokens 1:1 for all units
+            if (s.units > 0) {
+                token.mint(address(this), s.units);
+                totalTokensAllocated[holder] += s.units;
+                totalMinted += s.units;
             }
 
             // Set lockup for holder
@@ -239,9 +231,6 @@ contract StakeVault is AccessControl, ReentrancyGuard {
         }
 
         // Mint protocol fee (1% of this batch's minted tokens)
-        // Fees always accumulate in the vault until deployLiquidator is called.
-        // This prevents stranding tokens in a liquidator whose totalTokens was
-        // already initialized from an earlier batch.
         if (totalMinted > 0) {
             uint256 protocolFee = (totalMinted * PROTOCOL_FEE_BPS) / BPS_BASE;
             if (protocolFee > 0) {
@@ -254,7 +243,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @notice Deploy the protocol fee liquidator. Can be called separately if not done during transition.
+     * @notice Deploy the protocol fee liquidator.
      */
     function deployLiquidator(address liquidationRouter) external onlyRole(OPERATOR_ROLE) {
         if (address(protocolFeeLiquidator) != address(0)) revert TransitionAlreadyProcessed();
@@ -281,7 +270,7 @@ contract StakeVault is AccessControl, ReentrancyGuard {
     // ============ Token Claiming ============
 
     /**
-     * @notice Claim available (vested + unlocked) tokens.
+     * @notice Claim available tokens after lockup.
      */
     function claimTokens() external nonReentrant {
         uint64 lockupEnd = holderLockupEnd[msg.sender];
@@ -299,47 +288,12 @@ contract StakeVault is AccessControl, ReentrancyGuard {
         emit TokensClaimed(msg.sender, available);
     }
 
-    /**
-     * @notice Release newly vested tokens for a specific stake (callable by anyone).
-     */
-    function releaseVestedTokens(uint256 stakeId) external nonReentrant {
-        DepositedCert storage cert = depositedStakes[stakeId];
-        if (cert.originalHolder == address(0)) revert TransitionNotInitiated();
-        if (cert.tokensFullyClaimed) return;
-
-        uint256 totalVestedNow;
-        if (block.timestamp >= cert.vestEnd) {
-            totalVestedNow = cert.totalUnits;
-        } else if (block.timestamp < cert.vestCliff) {
-            totalVestedNow = cert.vestedUnitsAtTransition;
-        } else {
-            uint256 elapsed = block.timestamp - cert.vestStart;
-            uint256 duration = cert.vestEnd - cert.vestStart;
-            totalVestedNow = duration == 0 ? cert.totalUnits : (cert.totalUnits * elapsed) / duration;
-            // Floor clamp: revoked UNVESTED_ONLY stakes have totalUnits == vestedUnitsAtTransition
-            // (already fully vested). Linear interpolation on the reduced units can produce a value
-            // below vestedUnitsAtTransition, causing underflow in the newlyVested subtraction.
-            if (totalVestedNow < cert.vestedUnitsAtTransition) totalVestedNow = cert.vestedUnitsAtTransition;
-        }
-
-        uint256 newlyVested = totalVestedNow - cert.vestedUnitsAtTransition - cert.tokensClaimed;
-        if (newlyVested == 0) return;
-
-        cert.tokensClaimed += newlyVested;
-        if (cert.vestedUnitsAtTransition + cert.tokensClaimed >= cert.totalUnits) cert.tokensFullyClaimed = true;
-
-        // Mint newly vested tokens and allocate to holder
-        token.mint(address(this), newlyVested);
-        totalTokensAllocated[cert.originalHolder] += newlyVested;
-    }
-
     // ============ Governance Seats ============
 
     /**
      * @notice Start an auction for a governance seat.
      */
     function startSeatAuction(uint256 certId) external {
-        // Cert must be in the vault and not currently governed
         if (stakeContract.ownerOf(certId) != address(this)) revert CertNotInVault();
         GovernanceSeat storage seat = seats[certId];
         if (seat.active) revert SeatStillActive();
@@ -394,7 +348,6 @@ contract StakeVault is AccessControl, ReentrancyGuard {
         a.settled = true;
 
         if (a.highestBidder == address(0)) {
-            // No bids — seat stays in vault
             return;
         }
 
@@ -408,7 +361,6 @@ contract StakeVault is AccessControl, ReentrancyGuard {
             active: true
         });
 
-        // Transfer cert to governor (vault-initiated, bypasses soulbound)
         stakeContract.transferFrom(address(this), a.highestBidder, certId);
 
         StakeState memory s = stakeContract.getStake(certId);
@@ -428,13 +380,11 @@ contract StakeVault is AccessControl, ReentrancyGuard {
         address formerGovernor = seat.governor;
         uint256 bidReturn = seat.bidAmount;
 
-        // Force-transfer cert back to vault
         stakeContract.transferFrom(formerGovernor, address(this), certId);
 
         StakeState memory s = stakeContract.getStake(certId);
         totalGovernanceWeight -= s.units;
 
-        // Return bid tokens
         if (bidReturn > 0) token.transfer(formerGovernor, bidReturn);
 
         seat.active = false;
@@ -489,29 +439,24 @@ contract StakeVault is AccessControl, ReentrancyGuard {
         if (block.timestamp <= p.votingEnd) revert VotingPeriodNotEnded();
         if (p.executed) revert InvalidProposal();
 
-        // Check quorum
         uint256 totalVotes = p.votesFor + p.votesAgainst;
         uint256 quorumRequired = (token.totalSupply() * overrideQuorumBps) / BPS_BASE;
         if (totalVotes < quorumRequired) revert OverrideQuorumNotMet();
 
-        // Check threshold
         uint256 thresholdRequired = (totalVotes * overrideThresholdBps) / BPS_BASE;
         if (p.votesFor < thresholdRequired) revert OverrideThresholdNotMet();
 
         p.executed = true;
         lastOverrideTime = uint64(block.timestamp);
 
-        // Remove all active governors
         for (uint256 i; i < depositedStakeIds.length; i++) {
             uint256 certId = depositedStakeIds[i];
             GovernanceSeat storage seat = seats[certId];
             if (seat.active) {
                 address formerGovernor = seat.governor;
 
-                // Force-transfer cert back
                 stakeContract.transferFrom(formerGovernor, address(this), certId);
 
-                // Return bid
                 if (seat.bidAmount > 0) token.transfer(formerGovernor, seat.bidAmount);
 
                 seat.active = false;
@@ -542,19 +487,6 @@ contract StakeVault is AccessControl, ReentrancyGuard {
 
     function depositedStakeCount() external view returns (uint256) {
         return depositedStakeIds.length;
-    }
-
-    // ============ Internal ============
-
-    function _calculateVested(StakeState memory s) internal view returns (uint256) {
-        if (block.timestamp < s.vestCliff) return 0;
-        if (block.timestamp >= s.vestEnd) return s.units;
-
-        uint256 elapsed = block.timestamp - s.vestStart;
-        uint256 duration = s.vestEnd - s.vestStart;
-        if (duration == 0) return s.units;
-
-        return (s.units * elapsed) / duration;
     }
 
     /**
