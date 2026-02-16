@@ -387,33 +387,46 @@ The temptation is to add a recovery function: "if the holder can prove they lost
 
 ---
 
-## 21. Holder-Initiated Forfeiture (Burn)
+## 21. Dutch Auction Transition
 
-**Decision**: Stake holders can burn (permanently destroy) their own Stakes at any time by calling `burn(stakeId)`. No approval from the authority, board, or any third party is required. The burn is irreversible.
+**Decision**: When the authority initiates transition, the company offers 15–20% of authorized token supply via a descending-price Dutch auction. Auction proceeds are paired with a dedicated 3–5% LP token allocation to create a permanent, non-withdrawable Uniswap pool. The 1% protocol fee (Decision 11) is revenue — it does not fund liquidity.
 
-**Rationale**: Traditional equity holders can surrender shares. This happens in practice:
-- **Voluntary surrender** — Founder returns shares to simplify the cap table before a raise
-- **Tax write-off** — Holder writes off worthless equity (Section 165 loss in US tax law)
-- **Court-ordered forfeiture** — Court orders the holder to surrender shares; holder complies
-- **Buyback completion** — Company pays the holder (off-chain), holder destroys the certificate
-- **Estate cleanup** — Winding down a defunct company, clearing abandoned equity
+**Rationale**: Traditional IPOs rely on investment banks who buy shares at a discount, allocate them to preferred institutional clients, and resell at a markup — charging 4–7% for the service. The first-day "pop" (shares opening 20–40% above IPO price) isn't a success story; it's proof the underwriter mispriced the offering to reward their own clients at the company's expense. Google recognized this in 2004 and used a Dutch auction instead, raising $1.67B at a fair clearing price with no first-day windfall for insiders.
 
-Without burn, soulbound Stakes would accumulate forever — even after the company is dissolved, the equity is worthless, or a court has ordered forfeiture. Burn gives holders sovereignty over their own property, including the right to destroy it.
+The protocol replicates this model onchain. A smart contract runs the auction. No underwriter takes a cut. No allocation goes to preferred clients. Everyone pays the same clearing price.
 
-**Implementation**: `burn(stakeId)` checks `ownerOf(stakeId) == msg.sender`, cleans up storage (StakeState and pact mapping), and calls the ERC-721 internal `_burn`. This is the same pattern as ERC-20 burn functions (OpenZeppelin's ERC20Burnable), which are commonplace on Ethereum — nearly every major token supports holder-initiated burn.
+Supply architecture: Token supply follows an authorized / issued / reserved model. Authorized supply is the maximum tokens that can ever exist, set at transition and immutable. Issued supply is minted to existing certificate holders. Reserved supply is allocated for specific purposes but not yet distributed. No tokens are minted beyond authorized supply. Ever. 
 
-**What burn is NOT**:
-- Not revocation — the authority cannot burn someone else's Stake
-- Not pausable — holder can burn even when the contract is paused
-- Not restricted by transition — holder can burn pre-transition or post-transition
-- Not conditional — no reason required, no approval needed
+Recommended allocation:
 
-**How burn enables buyback without protocol-level mechanism**: The company negotiates a buyback off-chain (paying the holder in fiat, ETH, stablecoins, etc.). Once payment is confirmed, the holder burns their Stake. The protocol doesn't need to facilitate the payment — just the destruction. This is simpler, more flexible, and doesn't require the protocol to understand payment rails.
+Category	% of Authorized	Notes
+Existing stakeholders	55–65%	Converted from soulbound certificates
+Public offering	15–20%	Sold via Dutch auction
+Liquidity pool	3–5%	Paired with auction proceeds in Uniswap
+Contributor pool	10–15%	Future team, grants — governed post-transition
+Community	2–5%	Airdrops, rewards — governed post-transition
+No treasury allocation. No ecosystem fund. No advisor allocation. No foundation. These are categories where projects hide insider enrichment. If tokens need to go to advisors or ecosystem participants, they come from the contributor pool under governance oversight.
+
+How the auction works: The offering runs 3–7 days at the authority's discretion. Start price is set deliberately high — above any reasonable valuation. Price declines linearly. Bidders specify quantity and maximum price. Bids are sealed onchain (commit-reveal). At close, bids are sorted by price descending. The clearing price is where cumulative demand equals supply. All winning bidders pay the clearing price — not their bid. This eliminates the winner's curse and encourages honest bidding. Unsold tokens return to reserved supply under governance control.
+
+How liquidity is created: Auction proceeds (ETH) are paired with the 3–5% LP allocation (tokens) and deposited into a permanent Uniswap V3 pool. The pool is protocol-owned — no one can withdraw the liquidity. The auction clearing price sets the initial pool price, so there is no arbitrage gap between what bidders paid and where the market starts. This is the onchain equivalent of what underwriters do: find a price and create a market. The difference is no middleman taking 4–7%.
+
+What the 1% fee is NOT: The protocol's 1% transition fee (Decision 11) goes to the ProtocolFeeLiquidator as revenue, sold over 12 months (Decision 12). It does not fund liquidity. Liquidity comes from auction proceeds and the LP allocation — entirely separate mechanisms. The thesis claim that "1% seeds protocol-owned liquidity" is wrong and should not be repeated.
+
+**Alternatives considered**:
+
+Underwriter model (off-chain market maker): Reintroduces the exact intermediary the protocol eliminates. A market maker takes 4–7%, allocates to insiders, and the first-day pop transfers value from the company to the market maker's clients. The whole point is to not need this.
+Bonding curve: Continuous price discovery sounds elegant but creates front-running incentives. Early buyers get a mathematical advantage over later buyers — this is just a more sophisticated version of "insiders get in first." Dutch auctions produce one fair price for everyone.
+Direct listing (no auction, just launch a pool): Someone has to set the initial price. Without an auction, the founder picks a number. This is the worst case — insider-set pricing with no market validation. Most rug pulls in crypto start with an insider-priced Uniswap pool.
+Launchpad / IDO platform: Adds a gatekeeping intermediary that controls access and takes a cut. Defeats the purpose of a permissionless protocol.
 
 **Counterpoints**:
-- "Can someone be coerced into burning?" — Yes, but coercion is a legal matter, not a protocol matter. Courts coerce people into surrendering property all the time (garnishment, forfeiture, divorce settlements). The protocol provides the mechanism; enforcement is legal.
-- "What if a holder burns by mistake?" — Irreversible by design. The authority can issue a replacement Claim→Stake if the burn was accidental. This is no different from accidentally sending ETH to the wrong address — blockchain transactions are final.
-- "Burning reduces outstanding units — does that affect other holders?" — Yes. Burning is equivalent to share cancellation/retirement. Remaining holders' percentage ownership increases slightly. This is expected and desirable in buyback scenarios.
+
+"Dutch auctions are complex for retail participants." — The auction lasts 3–7 days. Place a bid, wait for clearing. The application layer simplifies this to: "Enter how much you want to invest. If the final price is at or below your maximum, you get tokens. If not, your funds are returned." Complexity lives in the contract, not the UX.
+"What if the auction is undersubscribed?" — Unsold tokens return to reserved supply. The pool is still created with whatever proceeds were raised. A thin pool is honest — it reflects actual demand. Better than a synthetic pool that fakes liquidity.
+"Google's auction had issues — the price dropped after IPO." — Google's auction priced at $85 and is now worth $170+. The "issues" were that underwriters talked it down because they lost their fee. The mechanism worked; the narrative didn't.
+"Why not let the company choose its own transition mechanism?" — Because bad defaults kill users. If the protocol offers "bring your own liquidity strategy," most founders will pick the cheapest option (direct listing with insider pricing), and their stakeholders will suffer. A fair auction is the protocol's opinion — and it's the right one.
+"Sealed bids add gas cost." — Commit-reveal is one extra transaction per bidder. For a once-in-a-company's-lifetime event, this is trivial.
 
 ---
 
@@ -457,9 +470,9 @@ In the protocol, this works naturally. `computePactId = keccak256(issuerId, cont
 
 ---
 
-## 24. Ethereum L1 Only
+## 24. Ethereum L1
 
-**Decision**: The protocol launches exclusively on Ethereum mainnet. No multi-chain deployment, no L2 variants, no cross-chain bridging at launch.
+**Decision**: The protocol launches on Ethereum mainnet. No multi-chain deployment, no L2 variants, no cross-chain bridging at launch.
 
 **Rationale**: Equity is the most consequential financial instrument a company issues. The chain it lives on must be the most credible, permanent, and battle-tested chain available. Ethereum L1 is the only chain with:
 - 10+ years of unbroken operation
