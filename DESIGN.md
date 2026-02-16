@@ -422,11 +422,11 @@ Launchpad / IDO platform: Adds a gatekeeping intermediary that controls access a
 
 **Counterpoints**:
 
-"Dutch auctions are complex for retail participants." — The auction lasts 3–7 days. Place a bid, wait for clearing. The application layer simplifies this to: "Enter how much you want to invest. If the final price is at or below your maximum, you get tokens. If not, your funds are returned." Complexity lives in the contract, not the UX.
-"What if the auction is undersubscribed?" — Unsold tokens return to reserved supply. The pool is still created with whatever proceeds were raised. A thin pool is honest — it reflects actual demand. Better than a synthetic pool that fakes liquidity.
-"Google's auction had issues — the price dropped after IPO." — Google's auction priced at $85 and is now worth $170+. The "issues" were that underwriters talked it down because they lost their fee. The mechanism worked; the narrative didn't.
-"Why not let the company choose its own transition mechanism?" — Because bad defaults kill users. If the protocol offers "bring your own liquidity strategy," most founders will pick the cheapest option (direct listing with insider pricing), and their stakeholders will suffer. A fair auction is the protocol's opinion — and it's the right one.
-"Sealed bids add gas cost." — Commit-reveal is one extra transaction per bidder. For a once-in-a-company's-lifetime event, this is trivial.
+- "Dutch auctions are complex for retail participants." — The auction lasts 3–7 days. Place a bid, wait for clearing. The application layer simplifies this to: "Enter how much you want to invest. If the final price is at or below your maximum, you get tokens. If not, your funds are returned." Complexity lives in the contract, not the UX.
+- "What if the auction is undersubscribed?" — Unsold tokens return to reserved supply. The pool is still created with whatever proceeds were raised. A thin pool is honest — it reflects actual demand. Better than a synthetic pool that fakes liquidity.
+- "Google's auction had issues — the price dropped after IPO." — Google's auction priced at $85 and is now worth $170+. The "issues" were that underwriters talked it down because they lost their fee. The mechanism worked; the narrative didn't.
+- "Why not let the company choose its own transition mechanism?" — Because bad defaults kill users. If the protocol offers "bring your own liquidity strategy," most founders will pick the cheapest option (direct listing with insider pricing), and their stakeholders will suffer. A fair auction is the protocol's opinion — and it's the right one.
+- "Sealed bids add gas cost." — Commit-reveal is one extra transaction per bidder. For a once-in-a-company's-lifetime event, this is trivial.
 
 ---
 
