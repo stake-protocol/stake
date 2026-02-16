@@ -1,5 +1,5 @@
 # Stake Protocol
-## Bringing Startup Equity Onchain
+### Bringing Startup Equity Onchain
 
 Startup equity has not moved onchain. Traditional finance buried it under intermediaries, and crypto skipped it entirely.
 
