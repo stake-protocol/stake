@@ -1,597 +1,558 @@
-# Stake Protocol — Security & Consistency Audit Report
+# Stake Protocol — Comprehensive Security Audit Report
 
-**Date**: 2026-02-23
-**Scope**: All documentation files and Solidity smart contracts
-**Auditor**: Automated cross-reference and security analysis
+**Audit Date**: February 23, 2026
+**Scope**: Full repository including all 23 merged PRs, 5 smart contracts, protocol spec, whitepaper, design decisions, EIP draft, thesis, and all supporting documentation.
+**Methodology**: Each PR was checked out at its merge commit and its diff reviewed. The final state of all contracts and documentation was then audited line-by-line.
 
 ---
 
 ## Executive Summary
 
-The Stake Protocol codebase contains a **fundamental architectural divergence** between the documentation and the implementation. The smart contracts implement a "vesting on Claims, Stakes are unconditional" model (consistent with `DESIGN.md`), while the protocol specification (`STAKE-PROTOCOL.md`), the EIP draft (`eip-draft.md`), the whitepaper (`WHITEPAPER.md`), the audit report (`AUDIT.md`), the verification guide (`VERIFY-WITHOUT-APP.md`), and the README (`README.md`) all describe a "vesting on Stakes with revocation" model. This means **7 out of 9 documentation files describe a system that does not match the deployed contracts**.
+The Stake Protocol is a soulbound equity certificate system with an optional transition to ERC-20 tokens and governance. The codebase has undergone significant architectural evolution across 23 PRs, culminating in a design where vesting lives on Claims (contingent certificates) and Stakes are unconditional ownership records.
 
-Additionally, the audit report (`AUDIT.md`) appears to have been conducted on an older version of the code, and every critical/high finding it reports has been fixed in the current contracts — yet the report is presented as current and its "Spec-to-Implementation Gap Summary" is completely wrong for the current state.
-
-### Severity Summary
+**Total Findings: 42**
 
 | Severity | Count |
-|---|---:|
+|----------|-------|
 | Critical | 3 |
-| High | 8 |
-| Medium | 10 |
-| Low | 7 |
-| Informational | 7 |
+| High | 7 |
+| Medium | 11 |
+| Low | 12 |
+| Informational | 9 |
+
+The most severe issues are: (1) a governance seat holder can permanently brick the override mechanism by burning their certificate, (2) override voting is vulnerable to flash loan attacks due to lack of snapshots, and (3) the protocol specification is fundamentally out of sync with the implemented contracts.
 
 ---
 
-## CRITICAL FINDINGS
+## Critical Findings
 
-### C-1: Fundamental Architecture Contradiction — Vesting Lives on Claims in Code but on Stakes in Spec/EIP/Whitepaper
+### C-01: Governance Seat Holder Can Permanently DoS Override Mechanism via `burn()`
 
-**Documents**: `STAKE-PROTOCOL.md` §6.4, §9.2, §11.3, §12.2 / `eip-draft.md` StakeState struct / `WHITEPAPER.md` §V.C / `DESIGN.md` Decision 3 / Actual code (`StakeCertificates.sol`)
+**Contract**: `SoulboundStake.sol` / `StakeVault.sol`
+**Lines**: `SoulboundStake:699-705`, `StakeVault:452-467`
 
-**Severity**: Critical
+`SoulboundStake.burn()` allows any holder to destroy their certificate. A governance seat winner holds their certificate in their wallet. If they call `burn(stakeId)`, the certificate is destroyed. When `executeOverride()` later runs, it iterates `depositedStakeIds` and calls `stakeContract.transferFrom(formerGovernor, address(this), certId)` for each active seat. This call will revert on the burned token (ERC-721 `ownerOf` reverts for non-existent tokens), causing the entire override transaction to revert.
 
-**What's wrong**: The most fundamental design question — where does vesting live? — is answered differently across documents:
+**Impact**: A single malicious governor can permanently disable the token holder override ("nuclear option") for ALL governance seats — not just their own. This is because `executeOverride` has no try/catch and iterates all seats in a single transaction. The override is the only mechanism token holders have to replace captured governance. Disabling it permanently eliminates the safety valve.
 
-| Source | Where vesting lives | Stakes revocable? |
+**Proof of Concept**:
+1. Governor wins seat for `certId=5` via auction
+2. Governor calls `stake.burn(5)` — certificate is destroyed
+3. Any future `executeOverride()` call reverts when it tries to `transferFrom` on the burned token
+4. All governance seats are now irremovable
+
+`reclaimSeat()` for that specific seat will also permanently revert, meaning the governor's bid tokens are locked forever in the vault.
+
+---
+
+### C-02: Flash Loan Governance Attack on Override Voting
+
+**Contract**: `StakeVault.sol`
+**Lines**: `StakeVault:416-431`
+
+`voteOverride()` reads voting weight from `token.governanceBalance(msg.sender)` at call time. There is no snapshot mechanism. An attacker can:
+
+1. Flash-borrow a large quantity of tokens
+2. Call `voteOverride(proposalId, true/false)` with the borrowed balance as weight
+3. Return the tokens in the same transaction
+
+The spec (§21.6) explicitly states: "Override votes SHOULD use a snapshot mechanism where voting power is determined at proposal creation, not at vote time." This is not implemented.
+
+**Impact**: Any override vote can be decided by flash loans, completely undermining the governance safety mechanism.
+
+---
+
+### C-03: Spec Is Fundamentally Out of Sync with Implementation
+
+**Files**: `spec/STAKE-PROTOCOL.md` vs all `.sol` contracts
+
+The specification describes a system that does not match the deployed contracts. The code underwent a major architectural refactoring in PR #23 (moving vesting from Stakes to Claims, making Stakes unconditional), but the spec was never fully updated. Key mismatches:
+
+| Spec Section | Spec Says | Code Does |
 |---|---|---|
-| `DESIGN.md` (Decision 3, 4) | Claims only | No — "once a Claim is redeemed to a Stake, no one can revoke or void that Stake" |
-| **Actual Code** | **Claims only** (`ClaimState` has `vestStart/vestCliff/vestEnd/revokedAt`; `StakeState` has none) | **No** — `SoulboundStake` has no revoke function |
-| `STAKE-PROTOCOL.md` §6.4 | Stakes (`vestStart`, `vestCliff`, `vestEnd`, `revokedAt`, `revokedUnits` on StakeState) | Yes — §9.2 describes three revocation modes |
-| `eip-draft.md` | Stakes (StakeState struct has `vestStart`, `vestCliff`, `vestEnd`, `revocableUnvested`) | Yes — has `revokeStake` in IStakeCertificate |
-| `WHITEPAPER.md` §V.C | Stakes ("A hash of the vesting schedule payload") | Implied yes via §V.C |
-| `AUDIT.md` C-1 | Stakes (reports vesting bug on `SoulboundStake.revokeStake`) | Yes |
+| §6.4 StakeState | 11 fields including vestStart, vestCliff, vestEnd, revokedAt, revocableUnvested, revokedUnits | 4 fields: issuedAt, unitType, units, reasonHash |
+| §6.3 ClaimState | 8 fields, no vesting | 11 fields including vestStart, vestCliff, vestEnd, revokedAt |
+| §9.2 | Stake revocation with vesting snapshot | No stake revocation; revocation is on Claims |
+| §11.3 IStakeCertificate | `mintStake(to, pactId, units, unitType, vestStart, vestCliff, vestEnd, revocableUnvested)` | `mintStake(to, pactId, units, unitType)` — 4 params, no vesting |
+| §11.4 IStakeCertificates | `redeemToStake(redemptionId, claimId, units, unitType, vestStart, vestCliff, vestEnd, reasonHash)` — 8 params | `redeemToStake(redemptionId, claimId, units, reasonHash)` — 4 params |
+| §11.4 IStakeCertificates | `issueClaim(issuanceId, to, pactId, maxUnits, unitType, redeemableAt)` — 6 params | `issueClaim(issuanceId, to, pactId, maxUnits, unitType, redeemableAt, vestStart, vestCliff, vestEnd)` — 9 params |
+| §11.4 IStakeCertificates | Has `revokeStake(stakeId, reasonHash)` | Has `revokeClaim(issuanceId, reasonHash)` instead |
+| §11.1 IPactRegistry | `createPact` has 9 params including `defaultRevocableUnvested` | `createPact` has 8 params, no `defaultRevocableUnvested` |
+| §11.5 IStakeVault | Has `releaseVestedTokens(stakeId)` | No such function exists (stakes are unconditional) |
+| §12.2 | "Mint ERC-20 tokens = vestedUnits at transition" | Mints tokens = all units (stakes are fully owned) |
+| §13.3 | "Unvested units at transition are NOT lost. Vault tracks vesting." | No vesting tracking in vault; all units are fully owned |
+| §4.4 | "A Stake MAY include vesting metadata" | Stakes have no vesting; Claims have vesting |
+| §6.2 | StakeState has `revoked` boolean field | StakeState has no `revoked` field |
 
-The **code** and **DESIGN.md** agree on the current architecture. Every other document describes an obsolete design. This means the protocol specification, the EIP, the whitepaper, and the audit report are all **materially wrong** about the core data model.
-
-**Why it matters**: Anyone implementing from the spec or EIP will build an incompatible system. Anyone reading the whitepaper will have incorrect expectations about how ownership works. The audit report is diagnosing bugs in code that no longer exists.
-
----
-
-### C-2: Audit Report (`AUDIT.md`) is Completely Outdated and Misleading
-
-**Document**: `AUDIT.md`
-
-**Severity**: Critical
-
-**What's wrong**: The audit report claims to review the current codebase ("Local working tree (pre-commit)") but every major finding has been fixed in the current code:
-
-| Audit Finding | Audit Claim | Current Code Reality |
-|---|---|---|
-| **C-1**: Revocation doesn't snapshot vested units on Stakes | Bug on `SoulboundStake.revokeStake` | Stakes have NO revocation. Vesting/revocation are on Claims. Claims properly snapshot via `revokedAt` timestamp (line 547, 609). |
-| **H-1**: Partial redemption discards remaining units | `markRedeemed` marks fully redeemed | `recordRedemption` properly tracks `redeemedUnits`, supports partial redemption (line 574). |
-| **H-2**: `unit_type` not stored on-chain | `ClaimState`/`StakeState` omit it | Both `ClaimState` (line 84) and `StakeState` (line 93) have `UnitType unitType`. |
-| **H-3**: Base URI cannot be set | No forwarding function on StakeCertificates | `setClaimBaseURI` (line 814) and `setStakeBaseURI` (line 819) exist. `BaseURIUpdated` event emitted (line 153). |
-| **H-4**: Authority cannot be rotated | Immutable authority | `transferAuthority(address newAuthority)` exists (line 792). |
-| **M-1**: Claims can't be voided when revocation disabled | `voidClaim` checks revocationMode | `voidClaim` works regardless of revocationMode (line 505). |
-| **M-3**: No batch issuance | Only single-item operations | `issueClaimBatch` exists (line 940). |
-| **L-1**: No event emitted on base URI change | Missing event | `BaseURIUpdated` event emitted (line 153). |
-| **L-4**: `getPact()` always reverts | No `tryGetPact` | `tryGetPact` exists (line 283). |
-
-The "Spec-to-Implementation Gap Summary" table at the end of the audit is also entirely wrong for the current code. It claims `unit_type` is not implemented (it is), claims transition/vault are not implemented (they are in `StakeVault.sol` and `StakeToken.sol`).
-
-**Why it matters**: Publishing a stale audit report that claims to cover the current code is dangerous. It gives a false sense of security (readers think issues were found and should be fixed) while real issues in the current code go unmentioned. It also creates liability risk — anyone relying on this audit would be misled.
+This is not a cosmetic documentation issue. Anyone implementing against the spec will build an incompatible system. Anyone auditing against the spec will reach incorrect conclusions about the security model.
 
 ---
 
-### C-3: No Snapshot Mechanism for Override Voting — Flash Loan / Token Transfer Attack Vector
+## High Severity Findings
 
-**Documents**: `STAKE-PROTOCOL.md` §21.6, `StakeVault.sol` lines 416-431
+### H-01: `transferAuthority(currentAuthority)` Self-Transfer Bricks Contract
 
-**Severity**: Critical
+**Contract**: `StakeCertificates.sol`
+**Lines**: `792-808`
 
-**What's wrong**: The spec explicitly identifies flash loan governance attacks as a threat vector and says "Override votes SHOULD use a snapshot mechanism where voting power is determined at proposal creation, not at vote time" (§21.6). The code does NOT implement snapshots — `voteOverride()` reads `token.governanceBalance(msg.sender)` at the time of the vote (line 422), not at proposal creation time.
-
-This means:
-1. A voter can vote with tokens, transfer them to another address, and vote again from that address.
-2. A flash loan attack is partially possible: borrow tokens, vote, return tokens (though the 14-day voting period limits pure flash loans, accumulated token movement across the period is still exploitable).
-3. Token holders can double-count their votes by transferring tokens between addresses during the voting period.
-
-**Why it matters**: The override is the "nuclear option" that replaces all governors. If the voting mechanism is manipulable, an attacker could execute an override with less than the intended threshold of support, seizing governance control.
-
----
-
-## HIGH FINDINGS
-
-### H-1: Spec Interface `IStakeCertificates` Does Not Match Code
-
-**Documents**: `STAKE-PROTOCOL.md` §11.4 vs `StakeCertificates.sol`
-
-**Severity**: High
-
-**What's wrong**: The spec's `IStakeCertificates` interface (§11.4) differs from the code in multiple ways:
-
-| Spec Function | Code Function |
-|---|---|
-| `redeemToStake(bytes32 redemptionId, uint256 claimId, uint256 units, UnitType unitType, uint64 vestStart, uint64 vestCliff, uint64 vestEnd, bytes32 reasonHash)` | `redeemToStake(bytes32 redemptionId, uint256 claimId, uint256 units, bytes32 reasonHash)` — no vesting params, no unitType |
-| `revokeStake(uint256 stakeId, bytes32 reasonHash)` | Does not exist. Has `revokeClaim(bytes32 issuanceId, bytes32 reasonHash)` instead |
-| `createPact(... bool defaultRevocableUnvested)` | `createPact(... RevocationMode revocationMode)` — no `defaultRevocableUnvested` param |
-| `issueClaim(... uint64 redeemableAt)` | `issueClaim(... uint64 redeemableAt, uint64 vestStart, uint64 vestCliff, uint64 vestEnd)` — extra vesting params |
-
-Additionally, the code has `revokeClaim` which is not in the spec interface at all.
-
----
-
-### H-2: Spec `IStakeVault` Interface Does Not Match Code
-
-**Documents**: `STAKE-PROTOCOL.md` §11.5 vs `StakeVault.sol`
-
-**Severity**: High
-
-**What's wrong**:
-
-| Spec Function | Code Reality |
-|---|---|
-| `processTransitionBatch(uint256[] stakeIds, address liquidationRouter)` | `processTransitionBatch(uint256[] stakeIds)` — no liquidationRouter param. Router is set separately via `deployLiquidator()`. |
-| `releaseVestedTokens(uint256 stakeId)` | Does not exist. Not needed because Stakes are unconditional (no vesting). |
-| `claimTokens()` | Exists and matches. |
-
-The spec describes a vault that tracks ongoing vesting schedules and releases tokens incrementally (§13.3). The code does a simple 1:1 token mint because Stakes have no vesting. The entire vesting-at-transition model described in the spec does not exist in the code.
-
----
-
-### H-3: Verification Guide (`VERIFY-WITHOUT-APP.md`) Has Completely Wrong ABI Signatures
-
-**Document**: `VERIFY-WITHOUT-APP.md`
-
-**Severity**: High
-
-**What's wrong**: The guide provides incorrect struct signatures that will fail when used:
-
-**ClaimState in guide** (line 41):
-```
-Returns: (voided, redeemed, issuedAt, redeemableAt, maxUnits, reasonHash)
-```
-
-**Actual ClaimState** (code line 76-88):
-```
-(voided, issuedAt, redeemableAt, vestStart, vestCliff, vestEnd, revokedAt, unitType, maxUnits, redeemedUnits, reasonHash)
-```
-
-**StakeState in guide** (line 47):
-```
-Returns: (revoked, issuedAt, vestStart, vestCliff, vestEnd, revocableUnvested, units, reasonHash)
-```
-
-**Actual StakeState** (code line 90-95):
-```
-(issuedAt, unitType, units, reasonHash)
-```
-
-The cast commands (lines 87-90), JavaScript ABIs (lines 120-126), and "What Each Field Means" tables (lines 200-220) are all wrong. Anyone following this guide to verify their ownership will get decode errors or incorrect data.
-
----
-
-### H-4: README Code Example Has Wrong Function Signature
-
-**Document**: `README.md` lines 113-123
-
-**Severity**: High
-
-**What's wrong**: The README example for `redeemToStake` shows:
-```solidity
-uint256 stakeId = certificates.redeemToStake(
-    redemptionId,
-    claimId,
-    1000,             // units
-    vestStart,
-    vestCliff,
-    vestEnd,
-    bytes32(0)        // reasonHash
-);
-```
-
-The actual function signature is:
-```solidity
-function redeemToStake(
-    bytes32 redemptionId,
-    uint256 claimId,
-    uint256 units,
-    bytes32 reasonHash
-)
-```
-
-The example passes vesting parameters that the function doesn't accept. Additionally, the README's `issueClaim` example (lines 105-111) is missing the `vestStart`, `vestCliff`, `vestEnd` parameters that the actual function requires.
-
----
-
-### H-5: `setAuthorizedSupply` Allows Decrease, Contradicting Spec
-
-**Documents**: `STAKE-PROTOCOL.md` §14.2 vs `StakeToken.sol` line 96
-
-**Severity**: High
-
-**What's wrong**: The spec says: "The `authorizedSupply` is set at transition and MAY only be **increased** by a token holder supermajority vote" (§14.2, emphasis added). The code allows both increase AND decrease:
+If the authority calls `transferAuthority(authority)` (passing their own address), the `_grantRole` calls are no-ops (roles already held), then `_revokeRole` removes all three roles (DEFAULT_ADMIN_ROLE, AUTHORITY_ROLE, PAUSER_ROLE). The authority permanently loses all access.
 
 ```solidity
-function setAuthorizedSupply(uint256 newSupply) external onlyRole(GOVERNANCE_ROLE) {
-    if (newSupply < totalSupply()) revert InvalidSupply();  // Only checks vs totalSupply, not vs current authorizedSupply
-    ...
+function transferAuthority(address newAuthority) external onlyRole(AUTHORITY_ROLE) whenNotTransitioned {
+    if (newAuthority == address(0)) revert InvalidAuthority();
+    address oldAuthority = authority;
+    authority = newAuthority;
+    _grantRole(DEFAULT_ADMIN_ROLE, newAuthority);  // no-op if same address
+    _grantRole(AUTHORITY_ROLE, newAuthority);       // no-op if same address
+    _grantRole(PAUSER_ROLE, newAuthority);          // no-op if same address
+    _revokeRole(DEFAULT_ADMIN_ROLE, oldAuthority);  // removes the role
+    _revokeRole(AUTHORITY_ROLE, oldAuthority);       // removes the role
+    _revokeRole(PAUSER_ROLE, oldAuthority);          // removes the role
 }
 ```
 
-This allows governance to reduce the authorized supply down to `totalSupply()`. While this can't destroy existing tokens, it eliminates reserved/unissued supply, which could be used as an attack by governors to prevent future legitimate issuance (e.g., employee compensation, capital raises).
+**Impact**: Permanently bricks the entire protocol. No pacts, claims, stakes, or transitions can ever be created again. Missing check: `if (newAuthority == oldAuthority) revert InvalidAuthority();`
 
 ---
 
-### H-6: No Annual Issuance Tracking — 20% Rule Not Enforced
+### H-02: StakeBoard Single-Member Execution After Response Window
 
-**Documents**: `STAKE-PROTOCOL.md` §14.3 vs `StakeToken.sol`
+**Contract**: `StakeBoard.sol`
+**Lines**: `210-250`
 
-**Severity**: High
+After the response deadline, the adjusted quorum formula is `ceil(quorum * responded / totalMembers)`. On a 5-member board with quorum=3, if only 1 member responds (the proposer, who auto-approves), the adjusted quorum becomes `ceil(3 * 1 / 5) = ceil(0.6) = 1`. Since the proposer auto-approved, the single member can execute any proposal.
 
-**What's wrong**: The spec requires (§14.3): "Governance MUST track cumulative issuance within each annual period" with a 20% threshold separating governance approval from token holder approval. The `StakeToken` contract has NO tracking of:
-- Annual issuance amounts
-- Annual period start/end dates
-- Different approval thresholds for <= 20% vs > 20%
-
-The `governanceMint` function (line 109) simply checks if the total supply would exceed authorized supply. There is no enforcement of the annual issuance limit.
+**Impact**: Any board member can unilaterally execute arbitrary actions on the StakeCertificates contract by simply waiting for the response window to expire. This bypasses the entire multisig governance model.
 
 ---
 
-### H-7: No Staggered Governance Seat Terms at Transition
+### H-03: StakeBoard Zero Response Window Allows Instant Execution
 
-**Documents**: `STAKE-PROTOCOL.md` §15.2 vs `StakeVault.sol`
+**Contract**: `StakeBoard.sol`
+**Lines**: `321-325`
 
-**Severity**: High
+`setResponseWindow(uint64 newWindow)` accepts 0. With `responseWindow = 0`, a proposer can create a proposal and execute it in the same block (or even same transaction via a contract), since `deadline = createdAt + 0 = createdAt` and `block.timestamp > deadline` is immediately true post-creation.
 
-**What's wrong**: The spec requires (§15.2): "At transition, seats MUST be assigned staggered initial term expiry dates. For N seats with term length T, the i-th seat expires at transitionTimestamp + (T * (i + 1)) / N. This ensures governance continuity — the entire governance body never turns over simultaneously."
-
-The vault code does NOT assign any terms at transition. Governance seats are only assigned terms when they are individually auctioned via `settleAuction()`. This means all initial auctions could happen simultaneously, and all initial terms could expire simultaneously — exactly the scenario the spec says MUST be prevented.
-
----
-
-### H-8: EIP Draft Status Flags Contradict Spec
-
-**Documents**: `eip-draft.md` vs `STAKE-PROTOCOL.md` §6.2
-
-**Severity**: High
-
-**What's wrong**: The EIP draft defines status as a `uint32` bitfield:
-```
-| Bit | Name | Description |
-| 0 | VOIDED | Certificate has been voided |
-| 1 | REVOKED | Stake has been revoked |
-| 2 | REDEEMED | Claim has been converted |
-```
-
-The spec explicitly rejects this approach (§6.2): "Certificate status is tracked via **individual boolean fields** on each certificate struct, **not a bitfield**. This keeps the storage layout simple and avoids bitwise operations in the EVM."
-
-The code agrees with the spec (uses individual booleans). The EIP contradicts both.
-
-Additionally, the EIP's `ClaimState` struct has a single `bool redeemed` while both the spec and code use `redeemedUnits`/`fullyRedeemed` to support partial redemption.
+**Impact**: Combined with H-02, a single board member can change the response window to 0 and then execute any number of arbitrary proposals without any other member's consent.
 
 ---
 
-## MEDIUM FINDINGS
+### H-04: `executeOverride()` Unbounded Loop Gas DoS
 
-### M-1: Whitepaper Claims Pact is "Immutable" — Misleading
+**Contract**: `StakeVault.sol`
+**Lines**: `452-467`
 
-**Document**: `thesis.md` line 18
+`executeOverride()` iterates the entire `depositedStakeIds` array. This array grows with every stake deposited during transition and is never pruned. For a large cap table (e.g., thousands of stakes), this loop can exceed the block gas limit.
 
-**Severity**: Medium
-
-**Specific text**: "A Pact, or Plain Agreement for Contract Terms, is an **immutable** onchain agreement that lets founders issue equity..."
-
-**What's wrong**: Pacts CAN be mutable. The `mutablePact` flag on the Pact struct controls whether amendments are allowed. Calling all Pacts "immutable" is misleading to potential users/investors. The spec correctly describes this as optional (`STAKE-PROTOCOL.md` §5.1: "A Pact MAY be declared mutable or immutable").
-
----
-
-### M-2: Whitepaper Gas Estimates Don't Match Spec
-
-**Documents**: `WHITEPAPER.md` §VII.B vs `STAKE-PROTOCOL.md` §12.2
-
-**Severity**: Medium
-
-| Estimate | Whitepaper | Spec |
-|---|---|---|
-| Gas per certificate at transition | ~130,000 | ~150,000 |
-| 50-person cap table total gas | ~6.5 million | ~7.5 million |
-| Cost estimate | "$15-60" | Not specified (spec just says "well within 30M limit") |
-
-These inconsistencies undermine credibility. The code does 1:1 unconditional token minting (simpler than either document describes), so the actual gas would differ from both estimates.
-
----
-
-### M-3: Pact Struct Missing `defaultRevocableUnvested` Field
-
-**Documents**: `STAKE-PROTOCOL.md` §5.2.1 vs `StakeCertificates.sol` line 63
-
-**Severity**: Medium
-
-**What's wrong**: The spec defines `defaultRevocableUnvested: bool` as an onchain Pact field. The code's `Pact` struct does not have this field. The spec's `createPact` interface (§11.1) includes it as a parameter. The code's `createPact` (on both `StakePactRegistry` and `StakeCertificates`) does not accept it.
-
-Since the current architecture has no revocation on Stakes, this field would be meaningless anyway — but the spec still lists it, and the spec interface includes it.
-
----
-
-### M-4: Spec `remainingUnits` Definition Differs from Code
-
-**Documents**: `STAKE-PROTOCOL.md` §11.2 vs `SoulboundClaim` line 583
-
-**Severity**: Medium
-
-**What's wrong**: The spec says `remainingUnits` returns `maxUnits - redeemedUnits` (§11.2). The code returns `vestedUnits - redeemedUnits` (line 588-589), which can be LESS than `maxUnits - redeemedUnits` if not all units have vested yet. This is actually more correct for the current architecture (where vesting is on Claims), but it's a behavioral difference from the spec.
-
----
-
-### M-5: Spec Clause ID `PWR_BOARD` vs Design Doc `PWR_BOARD_SEAT`
-
-**Documents**: `STAKE-PROTOCOL.md` §5.4 vs `DESIGN.md` §21.1.1
-
-**Severity**: Medium
-
-**What's wrong**: The spec's clause registry uses `PWR_BOARD` (§5.4). The design document's §21.1.1 refers to `PWR_BOARD_SEAT`. The whitepaper §VI.A uses `PWR_BOARD_SEAT` and `PWR_OFFICER`. These are supposed to be canonical identifiers — inconsistent naming prevents interoperability.
-
----
-
-### M-6: Protocol Fee Liquidator Has No Slippage Protection
-
-**Document**: `ProtocolFeeLiquidator.sol` line 156
-
-**Severity**: Medium
-
-**What's wrong**: The `liquidate()` function calls the router with no minimum output amount:
 ```solidity
-proceeds = ILiquidationRouter(router).liquidate(token, tokensSold, treasury);
+for (uint256 i; i < depositedStakeIds.length; i++) {
+    // ... process each seat
+}
 ```
 
-There is no check that `proceeds >= minExpected`. A sandwich attack could extract significant value from each liquidation. While the spec describes this as "permissionless" and "deterministic," the lack of slippage protection means the proceeds are NOT deterministic — they depend on pool state, which is manipulable.
+**Impact**: For companies with many stakeholders, the override mechanism becomes permanently unusable because the transaction will always exceed the block gas limit.
 
 ---
 
-### M-7: Whitepaper Transition Description Says "Single Batch" — Code Supports Multiple
+### H-05: Override Voting Allows Double-Voting via Token Transfer
 
-**Documents**: `WHITEPAPER.md` §VII.B vs `StakeVault.sol` line 184
+**Contract**: `StakeVault.sol`
+**Lines**: `416-431`
 
-**Severity**: Medium
+Even without flash loans, a token holder can vote, then transfer tokens to another address they control, and vote again from that address. The `hasVoted` check only prevents the same address from voting twice, not the same tokens from being counted twice.
 
-**Specific text** (Whitepaper): "all certificates are programmatically transferred to the vault **in a single batch operation**"
-
-**What's wrong**: The code's `processTransitionBatch` is designed to be called multiple times with different sets of stakeIds. The spec correctly describes this (§12.2: "This can be batched across multiple transactions"). The whitepaper's "single batch" claim is incorrect.
-
----
-
-### M-8: Whitepaper Says No Admin Override for Soulbound Transfers — Code Has Vault Bypass
-
-**Document**: `WHITEPAPER.md` §V.D
-
-**Severity**: Medium
-
-**Specific text**: "This is not a soft restriction. There is no 'emergency unlock.' There is no admin override that lets the issuer transfer someone's certificate to another wallet."
-
-**What's wrong**: The code DOES have an override — the vault contract can transfer certificates regardless of soulbound status (line 196: `if (auth != _vault) revert Soulbound()`). While the spec correctly documents this (§6.5.1), the whitepaper's absolute claim of "no admin override" is misleading. The vault is functionally an admin that can forcibly transfer certificates, even if it's code-controlled rather than EOA-controlled.
+**Impact**: Any holder can multiply their voting power by the number of addresses they control, making override vote outcomes untrustworthy.
 
 ---
 
-### M-9: Design Decision 11 Misdescribes Fee Basis
+### H-06: Stale AUDIT.md Misrepresents Security Status
 
-**Document**: `DESIGN.md` Decision 11
+**File**: `AUDIT.md`
 
-**Severity**: Medium
+The audit report references an outdated architecture (stakes with vesting and revocation). Every finding it reports has been addressed by the architectural refactoring in PR #23, yet the document still presents them as current issues. The spec-to-implementation gap table is entirely wrong.
 
-**Specific text**: "a 1% fee is assessed on **total token supply**"
-
-**What's wrong**: The code assesses 1% on tokens minted per batch for certificate holders (line 235: `uint256 protocolFee = (totalMinted * PROTOCOL_FEE_BPS) / BPS_BASE`), not on total token supply. The spec correctly describes this (§18.1): "Calculate the total tokens minted for certificate holders **in that batch**." The difference matters: if authorized supply is 100M but only 60M is minted for certificate holders, the fee is 1% of 60M (600K), not 1% of 100M (1M).
+**Impact**: Anyone relying on the audit report to assess the current security posture will have a fundamentally incorrect understanding of the system. More dangerously, they may believe previously identified issues are still outstanding when they've been architecturally eliminated, or may miss new issues introduced by the refactoring.
 
 ---
 
-### M-10: Auction Minimum Bid Semantics Unclear Across Unit Types
+### H-07: Spec's `IStakeVault` Interface Doesn't Match Implementation
 
-**Documents**: `StakeVault.sol` line 324 / `STAKE-PROTOCOL.md` §15.3
+**Files**: `spec/STAKE-PROTOCOL.md` §11.5, `StakeVault.sol`
 
-**Severity**: Medium
+The spec defines:
+```solidity
+function processTransitionBatch(uint256[] calldata stakeIds, address liquidationRouter) external;
+function releaseVestedTokens(uint256 stakeId) external;
+```
 
-**What's wrong**: The minimum bid is calculated as `(s.units * auctionMinBidBps) / BPS_BASE`. The `units` field's meaning depends on `unitType` (SHARES, BPS, WEI, CUSTOM). If a stake has 500 BPS units (= 5% ownership), the minimum bid would be 50 tokens. If a stake has 50,000 SHARES units, the minimum bid would be 5,000 tokens. These produce wildly different economic results. The spec doesn't address how minimum bids should work across different unit types.
+The implementation:
+```solidity
+function processTransitionBatch(uint256[] calldata stakeIds) external;  // no liquidationRouter param
+function deployLiquidator(address liquidationRouter) external;          // separate function
+// releaseVestedTokens does not exist
+```
 
----
-
-## LOW FINDINGS
-
-### L-1: EIP Draft Missing Clauses from Spec Registry
-
-**Documents**: `eip-draft.md` vs `STAKE-PROTOCOL.md` §5.4
-
-**Severity**: Low
-
-**What's wrong**: The EIP's "Standard Clause Registry" is missing 6 clauses that appear in the spec:
-- `PWR_DELEGATE` (delegation policy)
-- `PRI_CONVERT` (conversion behavior)
-- `PRO_APPROVALS` (protective provisions)
-- `PRO_MFN` (MFN upgrades)
-- `PRO_PREEMPTIVE` (preemptive rights)
-- `PRO_LOCKUP` (transfer lockup)
+**Impact**: Any integration built against the spec's interface will fail at deployment.
 
 ---
 
-### L-2: README Repository Structure is Incomplete
+## Medium Severity Findings
 
-**Document**: `README.md` lines 27-34
+### M-01: No Slippage Protection in ProtocolFeeLiquidator
 
-**Severity**: Low
+**Contract**: `ProtocolFeeLiquidator.sol`
+**Lines**: `146-158`
 
-**What's wrong**: The repository structure shows only `StakeCertificates.sol`. It does not mention `StakeToken.sol`, `StakeVault.sol`, `StakeBoard.sol`, or `ProtocolFeeLiquidator.sol`, which are all part of the protocol.
+The `liquidate()` function calls `ILiquidationRouter.liquidate(token, tokensSold, treasury)` with no minimum output amount parameter. The `ILiquidationRouter` interface itself has no `minAmountOut`.
 
----
-
-### L-3: Security Policy Says "Not Audited" Despite Having an Audit Report
-
-**Documents**: `SECURITY.md` line 46 vs `AUDIT.md`
-
-**Severity**: Low
-
-**Specific text** (SECURITY.md): "The reference implementation is provided for educational purposes and has **not been audited**."
-
-**What's wrong**: An audit report exists (`AUDIT.md`). Either the security policy should reference it, or the audit report should be clearly labeled as a self-audit / internal review rather than an external audit. The contradiction creates confusion about the security posture.
+**Impact**: Every liquidation is vulnerable to sandwich attacks. MEV bots can manipulate the pool price before the liquidation, extract value from the swap, and restore the price afterward.
 
 ---
 
-### L-4: StakeBoard Has No Target Validation
+### M-02: Unredeemed Claims Become Worthless After Transition
 
-**Document**: `StakeBoard.sol` line 24
+**Contract**: `StakeCertificates.sol`
+**Lines**: `1017-1027`
 
-**Severity**: Low
+`redeemToStake()` has both `onlyRole(AUTHORITY_ROLE)` and `whenNotTransitioned` modifiers. After `initiateTransition()`, the authority loses AUTHORITY_ROLE and the `transitioned` flag is set. Claims that were issued but not yet redeemed cannot be redeemed.
 
-**What's wrong**: The board accepts any `target_` address in the constructor. There is no validation that the target is actually a `StakeCertificates` contract, or that this board is set as the authority on that contract. A misconfigured board could execute proposals against the wrong contract, or proposals could fail silently because the board isn't the authority.
-
----
-
-### L-5: Override Proposal Can Be Created When No Active Governance Seats Exist
-
-**Document**: `StakeVault.sol` line 401
-
-**Severity**: Low
-
-**What's wrong**: `proposeOverride()` doesn't check if any governance seats are currently active. If there are no active seats, executing the override is a no-op that wastes gas and triggers the 90-day cooldown, blocking legitimate future overrides.
+**Impact**: Holders with unredeemed claims (e.g., unvested options not yet at cliff) lose their entire position at transition. There is no mechanism to redeem claims post-transition.
 
 ---
 
-### L-6: StakeBoard Cancel Uses Wrong Error
+### M-03: `setAuthorizedSupply` Allows Supply Decrease
 
-**Document**: `StakeBoard.sol` line 259
+**Contract**: `StakeToken.sol`
+**Lines**: `96-101`
 
-**Severity**: Low
-
-**What's wrong**: `cancel()` checks `msg.sender != p.proposer` and reverts with `NotMember()`. The error should be something like `NotProposer()` — the caller might be a member but not the proposer. Using `NotMember()` is misleading.
-
----
-
-### L-7: Dangling Token Approval in ProtocolFeeLiquidator
-
-**Document**: `ProtocolFeeLiquidator.sol` line 153
-
-**Severity**: Low
-
-**What's wrong**: `liquidate()` approves the router for `tokensSold` tokens, then calls the router. If the router doesn't consume the full approval (e.g., partial fill, router bug), a dangling approval remains. Should use `approve(router, 0)` after the swap, or use `safeIncreaseAllowance`.
+The spec (§14.2) says authorized supply "MAY only be increased by a token holder supermajority vote." The code allows any value >= `totalSupply()`, including decreasing the authorized supply. This could be used to block future legitimate minting.
 
 ---
 
-## INFORMATIONAL FINDINGS
+### M-04: No Annual Issuance Tracking for 20% Rule
 
-### I-1: Spec Reference [9] in thesis.md Points to Wrong Source
+**Contract**: `StakeToken.sol`
 
-**Document**: `thesis.md` line 28
+The spec (§14.3) mandates that annual issuance beyond 20% of outstanding supply requires a token holder vote. The `StakeToken` contract has no tracking of annual issuance amounts, annual period boundaries, or any enforcement of this 20% threshold. `governanceMint()` can mint up to the full authorized supply in a single call.
 
-**Severity**: Informational
-
-**Specific text**: "For context, traditional IPO underwriters charge 4–7% of gross proceeds[9]."
-
-**What's wrong**: The references section lists `[5]` for IPO fees, not `[9]`. Reference `[9]` doesn't exist in the sources list. The references section only goes to `[5]`.
+**Impact**: The anti-dilution safeguard described in §16.3 does not exist in the code.
 
 ---
 
-### I-2: Spec Describes Governance Seat Reclaim as Opening New Auction — Code Doesn't
+### M-05: No Staggered Governance Seat Terms at Transition
 
-**Document**: `STAKE-PROTOCOL.md` §15.5 vs `StakeVault.sol` line 375
+**Contract**: `StakeVault.sol`
 
-**Severity**: Informational
+The spec (§15.2) states: "At transition, seats MUST be assigned staggered initial term expiry dates." The vault has no mechanism for staggering terms. All seats go through the same auction process with the same term length.
 
-**What's wrong**: Spec §15.5 says `reclaimSeat` "Opens a new auction for the seat" (point 4). The code's `reclaimSeat()` only returns the certificate to the vault and returns bid tokens — it does NOT automatically start a new auction. A separate `startSeatAuction()` call is required.
-
----
-
-### I-3: Spec References `burnStake` in Decision 5 But Code Names It `burn`
-
-**Documents**: `DESIGN.md` Decision 5 vs `SoulboundStake.sol` line 699
-
-**Severity**: Informational
-
-**What's wrong**: DESIGN.md references `burnStake()` as the function name. The code names it simply `burn()`. Minor naming inconsistency.
+**Impact**: All governance seats could turn over simultaneously, creating a governance continuity gap.
 
 ---
 
-### I-4: Spec's IClaimCertificate Interface Differs from Code's SoulboundClaim
+### M-06: `vestStart=0` with Non-Zero `vestEnd` Causes Near-Instant Vesting
 
-**Documents**: `STAKE-PROTOCOL.md` §11.2 vs `SoulboundClaim`
+**Contract**: `StakeCertificates.sol` (SoulboundClaim)
+**Lines**: `604-619`
 
-**Severity**: Informational
+If `issueClaim` is called with `vestStart=0` and `vestEnd` set to a future timestamp, the vesting calculation computes elapsed time from Unix epoch (timestamp 0). Since `block.timestamp` is ~1.7 billion, virtually all units would vest immediately.
 
-**What's wrong**: The spec interface has `recordRedemption(uint256 claimId, uint256 units, bytes32 reasonHash)` which matches the code. But the spec interface does NOT include `revokeClaim()`, `vestedUnits()`, `unvestedUnits()`, or `redeemableUnits()` — all of which exist in the code. The spec's claim interface is incomplete for the current architecture where vesting/revocation are on claims.
+```solidity
+uint256 elapsed = timestamp - c.vestStart;  // ~1.7 billion if vestStart=0
+uint256 duration = c.vestEnd - c.vestStart;  // vestEnd (e.g., 1.7B + 4 years)
+return (c.maxUnits * elapsed) / duration;    // ~98% vested immediately
+```
 
----
-
-### I-5: DESIGN.md Incorrectly States Claim Has "revoked" and "disputed" Status Flags
-
-**Document**: `DESIGN.md` Decision 10, line 160
-
-**Severity**: Informational
-
-**Specific text** (V.B): "Status flags (voided, revoked, redeemed, disputed)"
-
-**What's wrong**: The whitepaper lists `disputed` as a Claim status flag. Neither the spec, the code, nor any other document implements a `DISPUTED` status. The `revoked` status on claims is represented via `revokedAt != 0` rather than a boolean flag.
+**Impact**: Claims intended to have multi-year vesting schedules would be immediately claimable if the authority accidentally sets `vestStart=0` but `vestEnd` to a non-zero value. The validation only checks `vestStart <= vestCliff && vestCliff <= vestEnd` when `vestEnd != 0`, but doesn't validate that `vestStart` is reasonable.
 
 ---
 
-### I-6: Spec §21.1.1 Uses `PWR_BOARD_SEAT` While §5.4 Uses `PWR_BOARD`
+### M-07: Vault Operator Retains Permanent DEFAULT_ADMIN_ROLE
 
-**Document**: `STAKE-PROTOCOL.md` §21.1.1 vs §5.4
+**Contract**: `StakeVault.sol`
+**Lines**: `171-172`
 
-**Severity**: Informational
+The vault operator receives `DEFAULT_ADMIN_ROLE` and `OPERATOR_ROLE` in the constructor. There is no mechanism to renounce these roles. The operator can:
+- Grant OPERATOR_ROLE to any address
+- Grant DEFAULT_ADMIN_ROLE to any address
+- Maintain permanent privileged access
 
-**What's wrong**: §5.4's clause registry lists `PWR_BOARD` with description "Board seat or appointment right". §21.1.1 refers to board seats as `PWR_BOARD_SEAT` clause. These should use the same canonical identifier.
-
----
-
-### I-7: DESIGN.md References `PWR_OFFICER` Clause Not in Spec Registry
-
-**Document**: `WHITEPAPER.md` §VI.A
-
-**Severity**: Informational
-
-**Specific text**: "Board seats and officer roles are recorded in Pacts as rights clauses (`PWR_BOARD_SEAT`, `PWR_OFFICER`)"
-
-**What's wrong**: `PWR_OFFICER` does not appear in the spec's clause registry (§5.4). It's referenced in the whitepaper but never defined.
+**Impact**: The "app can die" guarantee (§21.1) does not hold for the vault. If the operator key is compromised, the attacker has permanent, irrevocable admin access.
 
 ---
 
-## Summary of Cross-Document Contradictions
+### M-08: Governance Mint Bypasses Lockup
 
-| Topic | STAKE-PROTOCOL.md | WHITEPAPER.md | DESIGN.md | eip-draft.md | AUDIT.md | Code |
-|---|---|---|---|---|---|---|
-| Vesting location | Stakes | Stakes | **Claims** | Stakes | Stakes | **Claims** |
-| Stake revocable? | Yes | Implied | **No** | Yes | Yes (buggy) | **No** |
-| Claim revocable? | Only voided | Only voided | **Yes (3 modes)** | Only voided | — | **Yes (3 modes)** |
-| Status storage | Booleans | — | — | Bitfield | — | **Booleans** |
-| Partial redemption | Yes (§11.2) | — | — | No (single bool) | Broken (H-1) | **Yes** |
-| Protocol fee basis | Per-batch minted | Total minted | Total supply | — | — | **Per-batch minted** |
-| Gas per cert (transition) | ~150K | ~130K | — | — | — | **N/A (unconditional)** |
-| Batch transition | Multiple txns | Single batch | — | — | — | **Multiple txns** |
-| Vault has releaseVestedTokens | Yes | — | — | — | — | **No (not needed)** |
+**Contract**: `StakeToken.sol`
+**Lines**: `109-112`
+
+`governanceMint(address to, uint256 amount)` can mint tokens to any address without setting a lockup. The `processTransitionBatch` function sets lockups for original holders, but governance can mint new tokens to addresses with no lockup, allowing immediate selling.
 
 ---
 
-## Recommendations (Prioritized)
+### M-09: Auction Minimum Bid Rounds to Zero for Small Stakes
 
-### Must-Fix Before Any Release
+**Contract**: `StakeVault.sol`
+**Lines**: `323-325`
 
-1. **Update all documentation to match the current "vesting on Claims, Stakes unconditional" architecture.** The spec, EIP, whitepaper, and all supporting documents must reflect the code. (C-1)
-2. **Either remove or clearly label the audit report as outdated**, or conduct a new audit against the current code. (C-2)
-3. **Implement voting snapshots for override proposals** to prevent double-voting and token movement attacks. (C-3)
-4. **Fix VERIFY-WITHOUT-APP.md** with correct ABI signatures and examples. (H-3)
-5. **Fix README.md** code examples with correct function signatures. (H-4)
+```solidity
+uint256 minBid = (s.units * auctionMinBidBps) / BPS_BASE;
+```
 
-### Should-Fix Before Mainnet
-
-6. **Enforce authorized supply can only increase**, not decrease. (H-5)
-7. **Implement annual issuance tracking** to enforce the 20% rule. (H-6)
-8. **Implement staggered governance seat terms** at transition per spec requirement. (H-7)
-9. **Reconcile EIP draft** with current architecture — update struct definitions, remove bitfield, add partial redemption. (H-8)
-10. **Add slippage protection** to ProtocolFeeLiquidator. (M-6)
-
-### Should-Fix Pre-Launch
-
-11. Correct thesis.md's claim that Pacts are "immutable". (M-1)
-12. Reconcile gas estimates across documents. (M-2)
-13. Add snapshot-based voting or use `ERC20Votes` for governance. (C-3 extension)
-14. Clean up clause ID naming inconsistencies. (M-5, I-6, I-7)
+For stakes with fewer than `BPS_BASE / auctionMinBidBps` units (i.e., fewer than 10 units with default 10% minimum), the minimum bid rounds to 0. Combined with the check `if (amount < minBid)` (not `<=`), a bid of 0 tokens would satisfy the minimum.
 
 ---
 
-## Conclusion
+### M-10: `reclaimSeat` Does Not Auto-Open Auction
 
-The Stake Protocol's smart contracts implement a coherent architecture (vesting on Claims, unconditional Stakes, vault-based transition with governance seats). However, the documentation ecosystem is severely fractured — the protocol specification, EIP draft, whitepaper, audit report, verification guide, and README all describe an **older, incompatible design** where vesting and revocation live on Stakes. Only `DESIGN.md` and the investment thesis align with the current code.
+**Contract**: `StakeVault.sol`
+**Lines**: `375-393`
 
-The most urgent security issue is the lack of voting snapshots for override proposals (C-3), which creates a governance manipulation vector. The most urgent documentation issue is the stale audit report (C-2), which creates a false sense of security while missing real issues in the current code.
+The spec (§15.5) states that `reclaimSeat` should open a new auction: "Opens a new auction for the seat." The implementation does not start a new auction — it only returns the certificate to the vault. Someone must separately call `startSeatAuction()`.
 
-The contracts themselves are well-structured and the architectural choice of "vesting on Claims, unconditional Stakes" is defensible and well-reasoned in `DESIGN.md`. The primary work needed is documentation reconciliation and implementation of spec-mandated safety features (snapshots, annual issuance limits, staggered terms).
+---
+
+### M-11: Incomplete Role Revocation at Transition
+
+**Contract**: `StakeCertificates.sol`
+**Lines**: `844-848`
+
+`initiateTransition()` only revokes roles from `authority` (the current authority variable). If additional addresses were granted roles directly via OpenZeppelin's `grantRole()` (which is possible since `authority` holds `DEFAULT_ADMIN_ROLE` pre-transition), those addresses retain their roles after transition.
+
+---
+
+## Low Severity Findings
+
+### L-01: `burn()` Works When Paused
+
+**Contract**: `StakeCertificates.sol` (SoulboundStake)
+**Lines**: `699-705`
+
+`SoulboundStake.burn()` has no `whenNotPaused` modifier. Holders can burn their stakes even when the protocol is paused. While this is documented as intentional ("it's their property"), it means pause cannot prevent destructive operations.
+
+---
+
+### L-02: Smart Wallet Check Bypassable During Contract Construction
+
+**Contract**: `StakeCertificates.sol`
+**Lines**: `921`
+
+`to.code.length == 0` returns true during contract construction (before the constructor finishes). An EOA could deploy a contract that calls `issueClaim` in the constructor with itself as recipient, bypassing the smart wallet check. The recipient would end up being a contract, so this is a minor bypass.
+
+---
+
+### L-03: `issueClaimBatch` Forces Uniform Parameters
+
+**Contract**: `StakeCertificates.sol`
+**Lines**: `940-977`
+
+`issueClaimBatch` takes a single `unitType`, `redeemableAt`, `vestStart`, `vestCliff`, `vestEnd` for all recipients. If different recipients need different parameters, multiple batch calls or individual calls are needed.
+
+---
+
+### L-04: No Duplicate StakeId Protection in `processTransitionBatch`
+
+**Contract**: `StakeVault.sol`
+**Lines**: `199-231`
+
+While there is an `AlreadyDeposited` check, a malicious operator could include the same stakeId twice in the same batch. The first iteration would process it; the second would revert the entire batch. The check prevents double-processing across batches but could DoS a single batch.
+
+Actually, this is handled: `if (depositedStakes[stakeId].originalHolder != address(0)) revert AlreadyDeposited();` — the second encounter in the same batch would revert because the first already set `originalHolder`. This is correct but the revert is batch-wide, not per-item.
+
+---
+
+### L-05: CI Slither Analysis Uses `continue-on-error: true`
+
+**File**: `.github/workflows/ci.yml`
+
+The Slither static analysis step has `continue-on-error: true`, meaning security findings from Slither never block CI. PRs with critical Slither findings can merge without review.
+
+---
+
+### L-06: Gas Snapshots Auto-Regenerate on Failure
+
+**File**: `.github/workflows/ci.yml`
+
+```yaml
+run: forge snapshot --check --tolerance 5 || forge snapshot
+```
+
+If gas usage increases beyond 5% tolerance, instead of failing, the CI regenerates the snapshot. Gas regressions are silently accepted.
+
+---
+
+### L-07: CI Uses Nightly Foundry Toolchain
+
+**File**: `.github/workflows/ci.yml`
+
+`version: nightly` means the build toolchain changes daily. This can cause non-deterministic builds and silent compilation behavior changes.
+
+---
+
+### L-08: No Event for Response Window Change on StakeBoard
+
+**Contract**: `StakeBoard.sol`
+
+While `ResponseWindowUpdated` event is defined and emitted, there's no minimum value validation on `setResponseWindow`. Setting it to 0 (see H-03) has severe implications but emits only a benign event.
+
+---
+
+### L-09: Revert Data Suppression in StakeBoard
+
+**Contract**: `StakeBoard.sol`
+**Lines**: `246-247`
+
+```solidity
+(bool success,) = target.call(p.data);
+if (!success) revert ExecutionFailed();
+```
+
+The revert data from the target call is discarded. If the target call fails, the only error is `ExecutionFailed()` with no indication of why the underlying call reverted.
+
+---
+
+### L-10: `onERC721Received` on StakeVault but Uses `transferFrom` Not `safeTransferFrom`
+
+**Contract**: `StakeVault.sol`
+**Lines**: `495-497`
+
+The vault implements `onERC721Received` for ERC-721 compatibility, but the actual transfers use `transferFrom` (not `safeTransferFrom`). The callback will never be called through the protocol's own operations.
+
+---
+
+### L-11: Verification Guide Has Wrong ABI Signatures
+
+**File**: `docs/VERIFY-WITHOUT-APP.md`
+
+The guide references old function signatures that no longer match the current contract ABIs (e.g., missing `unitType` parameter on `issueClaim`, presence of `revokeStake` which no longer exists on the coordinator).
+
+---
+
+### L-12: README Code Examples Use Outdated Signatures
+
+**File**: `README.md`
+
+Code examples reference old function signatures and architectural patterns that don't match the current contracts.
+
+---
+
+## Informational Findings
+
+### I-01: EIP Draft Uses Bitfield Status Flags
+
+**File**: `eip/eip-draft.md`
+
+The EIP draft describes certificate status using a bitfield (`ACTIVE | VOIDED | REDEEMED | REVOKED = 0x01 | 0x02 | 0x04 | 0x08`). Both the spec (§6.2) and code use separate boolean fields. The three documents are inconsistent.
+
+---
+
+### I-02: AUDIT.md Date Is Backdated
+
+**File**: `AUDIT.md`
+
+The audit report shows dates from 2025 despite being created in February 2026.
+
+---
+
+### I-03: Thesis Contains Unverifiable Claims
+
+**File**: `thesis.md`
+
+References to "Vitalik's February 2026 posts" and specific market size figures should be verifiable. These are editorial claims, not security issues.
+
+---
+
+### I-04: No Test Coverage for StakeVault, StakeBoard, or ProtocolFeeLiquidator
+
+**Files**: `contracts/test/`
+
+Only `StakeCertificates.t.sol` and `StakeToken.t.sol` exist. There are no tests for the post-transition contracts (StakeVault, StakeBoard, ProtocolFeeLiquidator). All vault, auction, governance seat, override, and liquidation logic is untested.
+
+---
+
+### I-05: No Fuzz Tests
+
+**Files**: `contracts/test/`
+
+The test suite uses only fixed inputs. No fuzz testing, no invariant testing. Critical numerical logic (vesting calculations, quorum math, fee calculations) should be fuzz tested.
+
+---
+
+### I-06: DESIGN.md Describes 31 Design Decisions Spanning Obsolete and Current Architecture
+
+**File**: `DESIGN.md`
+
+The design decisions document covers the full evolution of the protocol including decisions that were later reversed by the architectural refactoring. While useful as a historical record, it doesn't clearly distinguish current architecture from superseded decisions.
+
+---
+
+### I-07: `.env.example` Shows Private Key Format
+
+**File**: `contracts/.env.example`
+
+`DEPLOYER_PRIVATE_KEY=0x...` is visible. While `.gitignore` properly excludes `.env` files, showing the format in the example could lead to copy-paste errors.
+
+---
+
+### I-08: `defaultRevocableUnvested` Referenced in Spec But Removed from Code
+
+**Files**: `spec/STAKE-PROTOCOL.md` §5.2.1, `StakeCertificates.sol`
+
+The Pact struct in the spec includes `default_revocable_unvested`, but the actual `Pact` struct in the code does not have this field (it was removed when revocation moved to Claims). The `IPactRegistry.createPact` in the spec still has this parameter.
+
+---
+
+### I-09: Whitepaper Describes Outdated Architecture
+
+**File**: `WHITEPAPER.md`
+
+The whitepaper describes the original architecture where stakes have vesting and revocation. It should be updated to reflect the current architecture where claims handle vesting and stakes are unconditional.
+
+---
+
+## Summary of Spec vs Implementation Mismatches
+
+The protocol underwent a fundamental architectural change in PR #23 that moved vesting and revocation from Stakes to Claims. This change was correctly implemented in the contracts and test suite, but the following documents were NOT updated:
+
+| Document | Status |
+|---|---|
+| `spec/STAKE-PROTOCOL.md` | **Partially updated** — lifecycle overview is correct, but §6.3/§6.4 field tables, §9.2 revocation rules, §11.x interfaces, §12.2 transition process, and §13.3 token distribution all describe the old architecture |
+| `WHITEPAPER.md` | **Not updated** — describes old architecture throughout |
+| `eip/eip-draft.md` | **Not updated** — uses bitfield status, old interfaces |
+| `AUDIT.md` | **Not updated** — all findings reference old architecture |
+| `docs/VERIFY-WITHOUT-APP.md` | **Not updated** — wrong function signatures |
+| `README.md` | **Not updated** — wrong code examples |
+| `DESIGN.md` | **Partially updated** — covers architectural evolution but doesn't clearly mark superseded decisions |
+| `thesis.md` | **Current** — describes the protocol at a high level correctly |
+
+---
+
+## Recommendations
+
+### Immediate (Before Any Deployment)
+
+1. **Fix C-01**: Add a mechanism to prevent `burn()` on certificates held by governance seat winners, or add try/catch in `executeOverride()` to handle burned certificates gracefully.
+2. **Fix C-02**: Implement snapshot-based voting for override proposals. Record each voter's balance at proposal creation time and use that for weight calculation.
+3. **Fix H-01**: Add `if (newAuthority == authority) revert InvalidAuthority();` to `transferAuthority()`.
+4. **Fix H-02/H-03**: Add a minimum response window validation in `setResponseWindow()` and consider a minimum adjusted quorum floor (e.g., at least 2 approvals regardless of response rate).
+5. **Fix M-01**: Add slippage protection (`minAmountOut`) to the `ILiquidationRouter` interface and `ProtocolFeeLiquidator.liquidate()`.
+6. **Fix M-06**: Validate `vestStart` is not 0 when `vestEnd` is non-zero, or validate `vestStart >= block.timestamp - REASONABLE_LOOKBACK`.
+
+### Before Production
+
+7. **Fix C-03**: Fully update the spec, whitepaper, EIP draft, audit report, verification guide, and README to match the current architecture.
+8. **Fix M-02**: Add a post-transition redemption mechanism or explicitly warn issuers that all claims must be redeemed before transition.
+9. **Fix M-04**: Implement the 20% annual issuance tracking described in the spec.
+10. **Fix M-07**: Add a mechanism for the vault operator to renounce their admin role after transition processing is complete.
+11. Add comprehensive test suites for `StakeVault`, `StakeBoard`, and `ProtocolFeeLiquidator`.
+12. Add fuzz tests for vesting calculations, quorum math, and fee calculations.
+13. Make Slither CI non-soft-fail.
+
+### Long-Term
+
+14. Consider implementing ERC-20 voting snapshots (e.g., ERC-20Votes from OpenZeppelin) for all governance mechanisms.
+15. Consider adding a circuit breaker or rate limiter to `governanceMint` to enforce the 20% annual rule onchain.
+16. Consider pagination for `executeOverride()` to handle large cap tables within block gas limits.
+
+---
+
+*Report generated by comprehensive audit of all 23 merged PRs and final codebase state.*
